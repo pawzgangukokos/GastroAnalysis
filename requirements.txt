@@ -1,8 +1,0 @@
-customtkinter
-matplotlib
-numpy
-openpyxl
-pandas
-pdfplumber
-pymupdf
-pypdf

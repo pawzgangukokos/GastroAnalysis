@@ -100,6 +100,11 @@ def resolve_brand_and_location(
             return loc_id, brand_id, False, None
 
     if not auto_create:
+        try:
+            import brand_service
+            brand_service.record_pending_brand_alias(cur, clean_name, platform=platform, source_type="import", status="pending")
+        except Exception:
+            pass
         return None, None, False, f"Unmapped restaurant '{clean_name}' (brand_id=NULL)."
 
     # 4. Create brand under default location and register both aliases
@@ -139,6 +144,7 @@ class CSVImporter:
     def __init__(self):
         self.exclusions = self._load_exclusions()
         self.aliases = self._load_aliases()
+        self._resolved_venue_cache = {}
 
     def _load_exclusions(self) -> List[str]:
         with closing(get_connection()) as conn:
@@ -242,25 +248,25 @@ class CSVImporter:
 
         return None
 
-    def _resolve_or_create_venue(self, venue_raw: str, platform_name: str) -> Tuple[int, int]:
+    def _resolve_or_create_venue(self, venue_raw: str, platform_name: str, conn=None) -> Tuple[int, int]:
+        key = (venue_raw, platform_name)
+        if key in self._resolved_venue_cache:
+            return self._resolved_venue_cache[key]
         if venue_raw in self.aliases:
-            entry = self.aliases[venue_raw]
-            return int(entry["location_id"]), int(entry["brand_id"])
-
-        with closing(get_connection()) as conn:
-            cur = conn.cursor()
-            loc_id, brand_id, _, _ = resolve_brand_and_location(
-                cur, venue_raw, platform_name, auto_create=True
-            )
-            conn.commit()
-
-        self.aliases[venue_raw] = {
-            "csv_venue_name": venue_raw,
-            "platform": platform_name,
-            "location_id": loc_id,
-            "brand_id": brand_id,
-        }
-        return int(loc_id), int(brand_id)
+            e = self.aliases[venue_raw]
+            out = (int(e["location_id"]), int(e["brand_id"]))
+            self._resolved_venue_cache[key] = out
+            return out
+        if conn is not None:
+            loc_id, brand_id, _, _ = resolve_brand_and_location(conn.cursor(), venue_raw, platform_name, auto_create=True)
+        else:
+            with closing(get_connection()) as c:
+                loc_id, brand_id, _, _ = resolve_brand_and_location(c.cursor(), venue_raw, platform_name, auto_create=True)
+                c.commit()
+        out = (int(loc_id), int(brand_id))
+        self.aliases[venue_raw] = {"csv_venue_name": venue_raw, "platform": platform_name, "location_id": loc_id, "brand_id": brand_id}
+        self._resolved_venue_cache[key] = out
+        return out
 
     def parse_items_detailed(self, item_string: str) -> Tuple[int, List[Tuple[str, int]]]:
         if pd.isna(item_string) or not str(item_string).strip():
@@ -279,7 +285,7 @@ class CSVImporter:
 
         total_items = 0
         dish_totals: Dict[str, int] = {}
-        pattern = re.compile(r"(\d+)\s*[xX]\s*(.+?)(?=(?:,\s*\d+\s*[xX]\s)|$)")
+        pattern = re.compile(r"(?<!\w)(\d+)\s*[xX]\s*(.+?)(?=(?:,\s*(?<!\w)\d+\s*[xX]\s)|$)")
         matches = pattern.findall(cleaned)
 
         for qty_str, raw_desc in matches:
@@ -320,6 +326,8 @@ class CSVImporter:
         override_mapping: Optional[Dict[str, str]] = None,
         override_platform: Optional[str] = None,
     ) -> dict:
+        self.exclusions = self._load_exclusions()
+        self.aliases = self._load_aliases()
         df = self.sniff_table(filepath)
 
         # Route payout/cost CSVs to PayoutImporter instead of orders table
@@ -402,8 +410,7 @@ class CSVImporter:
             parsed_sales = parse_money(row.get(sales_col)) if sales_col else None
             total_sales = float(parsed_sales) if parsed_sales is not None else 0.0
 
-            if total_sales < 0:
-                status = "cancelled"
+            if total_sales < 0 and status == "cancelled":
                 total_sales = abs(total_sales)
 
             items_raw = row.get(col_map.get("Items Count or Items Text", ""))
@@ -719,8 +726,8 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
                     (target_brand_id, target_loc_id, new_oid, source_brand_id, plat, orig_oid),
                 )
                 cur.execute(
-                    "DELETE FROM order_items WHERE brand_id = ? AND platform = ? AND order_id = ?",
-                    (source_brand_id, plat, orig_oid),
+                    "DELETE FROM order_items WHERE brand_id = ? AND platform = ? AND order_id = ? AND rowid IN (SELECT rowid FROM order_items WHERE brand_id = ? AND platform = ? AND order_id = ? AND EXISTS (SELECT 1 FROM order_items t WHERE t.brand_id = ? AND t.location_id = ? AND t.platform = ? AND t.order_id = ? AND t.item_name = order_items.item_name))",
+                    (source_brand_id, plat, orig_oid, source_brand_id, plat, orig_oid, target_brand_id, target_loc_id, plat, new_oid),
                 )
 
             has_items_tbl = cur.execute(
@@ -756,6 +763,16 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
             cur.execute("UPDATE payout_cost_items SET brand_id = ? WHERE brand_id = ?", (target_brand_id, source_brand_id))
             cur.execute("UPDATE brand_aliases SET brand_id = ? WHERE brand_id = ?", (target_brand_id, source_brand_id))
 
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO operating_calendar
+                    (location_id, brand_id, date, status, open_time, close_time, notes)
+                SELECT ?, ?, date, status, open_time, close_time, notes
+                FROM operating_calendar
+                WHERE brand_id = ?
+                """,
+                (target_loc_id, target_brand_id, source_brand_id),
+            )
             cur.execute("DELETE FROM operating_calendar WHERE brand_id = ?", (source_brand_id,))
             cur.execute("DELETE FROM brands WHERE id = ?", (source_brand_id,))
             conn.commit()

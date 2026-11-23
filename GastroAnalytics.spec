@@ -11,6 +11,7 @@ hiddenimports = [
     "pypdf",
     "pdfplumber",
     "fitz",
+    "brand_service",
 ]
 hiddenimports += collect_submodules("matplotlib")
 

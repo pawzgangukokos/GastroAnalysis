@@ -118,7 +118,21 @@ def _build_dedup_periods_cte(where_sql: str) -> str:
             CASE WHEN settlement_docs_count > 0 THEN disc_settlement ELSE disc_all END AS disc_period,
             CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END AS ref_period,
             CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END AS other_period,
-            CASE WHEN settlement_docs_count > 0 THEN costs_settlement ELSE costs_all END AS costs_period,
+            CASE
+                WHEN LOWER(COALESCE(platform, '')) = 'wolt' THEN (
+                    COALESCE(CASE WHEN settlement_docs_count > 0 THEN comm_settlement ELSE comm_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ads_settlement ELSE ads_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END, 0.0)
+                )
+                ELSE (
+                    COALESCE(CASE WHEN settlement_docs_count > 0 THEN comm_settlement ELSE comm_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ads_settlement ELSE ads_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN disc_settlement ELSE disc_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END, 0.0)
+                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END, 0.0)
+                )
+            END AS costs_period,
             payout_period
         FROM period_agg
     )
@@ -156,6 +170,14 @@ def get_payout_overview(
             list(params) + [date_to, date_from, date_to, date_from],
         ).fetchone()
 
+    if row is None:
+        return {
+            "reports_count": 0, "unmapped_reports_count": 0, "warning_reports_count": 0,
+            "gross_sales_total": 0.0, "commissions_fees_gross": 0.0, "ads_campaigns_gross": 0.0,
+            "merchant_discounts_gross": 0.0, "deductions_refunds_gross": 0.0,
+            "other_adjustments_gross": 0.0, "total_costs_gross": 0.0,
+            "payout_amount_gross": 0.0, "cost_share_pct": 0.0,
+        }
     gross_sales = round(float(row["gross_sales_total"] or 0.0), 2)
     total_costs = round(float(row["total_costs_gross"] or 0.0), 2)
     payout_total = round(float(row["payout_amount_gross"] or 0.0), 2)
@@ -242,6 +264,30 @@ def get_cost_items_breakdown(
     )"""
     full_where = f"{where_sql} AND {dedup_clause}" if where_sql else f" WHERE {dedup_clause}"
 
+    has_bounds = bool(date_from or date_to)
+    overlap_expr = (
+        """
+        CASE
+            WHEN i.period_start IS NOT NULL AND i.period_end IS NOT NULL
+                 AND i.period_start != '' AND i.period_end != ''
+                 AND julianday(i.period_end) >= julianday(i.period_start)
+            THEN CAST(
+                MAX(
+                    0.0,
+                    MIN(julianday(i.period_end), julianday(COALESCE(?, i.period_end)))
+                    - MAX(julianday(i.period_start), julianday(COALESCE(?, i.period_start)))
+                    + 1.0
+                ) / (julianday(i.period_end) - julianday(i.period_start) + 1.0)
+                AS REAL
+            )
+            ELSE 1.0
+        END
+        """
+        if has_bounds
+        else "1.0"
+    )
+    query_params = ([date_to, date_from] * 3 if has_bounds else []) + list(params)
+
     with closing(get_connection()) as conn:
         df = pd.read_sql_query(
             f"""
@@ -250,9 +296,9 @@ def get_cost_items_breakdown(
                 i.raw_label,
                 i.platform,
                 COUNT(*) AS occurrences,
-                ROUND(COALESCE(SUM(i.amount_gross), 0.0), 2) AS amount_gross_total,
-                ROUND(COALESCE(SUM(i.amount_net), 0.0), 2) AS amount_net_total,
-                ROUND(COALESCE(SUM(i.vat_amount), 0.0), 2) AS vat_amount_total
+                ROUND(COALESCE(SUM(i.amount_gross * ({overlap_expr})), 0.0), 2) AS amount_gross_total,
+                ROUND(COALESCE(SUM(COALESCE(i.amount_net, 0.0) * ({overlap_expr})), 0.0), 2) AS amount_net_total,
+                ROUND(COALESCE(SUM(COALESCE(i.vat_amount, 0.0) * ({overlap_expr})), 0.0), 2) AS vat_amount_total
             FROM payout_cost_items i
             LEFT JOIN payout_reports r ON r.id = i.payout_report_id
             {full_where}
@@ -260,7 +306,7 @@ def get_cost_items_breakdown(
             ORDER BY amount_gross_total DESC, i.cost_category ASC, i.raw_label ASC
             """,
             conn,
-            params=params,
+            params=query_params,
         )
 
     if not df.empty:
@@ -341,38 +387,6 @@ def assign_report_brand(report_id: int, brand_id: int, register_alias: bool = Tr
 
 
 
-def _get_orders_sales_fallback(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    brand_id: Optional[int] = None,
-    platform: Optional[str] = None,
-) -> float:
-    clauses = [
-        "LOWER(TRIM(COALESCE(o.status, ''))) NOT IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone')"
-    ]
-    params: list = []
-    if date_from:
-        clauses.append("date(o.order_datetime) >= ?")
-        params.append(date_from)
-    if date_to:
-        clauses.append("date(o.order_datetime) <= ?")
-        params.append(date_to)
-    if brand_id is not None:
-        clauses.append("o.brand_id = ?")
-        params.append(int(brand_id))
-    if platform and platform.strip().lower() not in {"", "all"}:
-        clauses.append("LOWER(o.platform) = LOWER(?)")
-        params.append(platform.strip())
-
-    where_sql = " WHERE " + " AND ".join(clauses)
-    with closing(get_connection()) as conn:
-        row = conn.execute(
-            f"SELECT COALESCE(SUM(o.total_sales), 0.0) AS ord_sales FROM orders o {where_sql}",
-            params,
-        ).fetchone()
-    return round(float(row["ord_sales"] or 0.0), 2) if row else 0.0
-
-
 
 def _orders_sales_for_scope(
     date_from: Optional[str] = None,
@@ -424,7 +438,8 @@ def get_loss_summary(
         brand_id=brand_id,
         platform=platform,
     )
-    gross_sales = max(float(ov["gross_sales_total"] or 0.0), float(ord_sales or 0.0))
+    ov_sales = float(ov["gross_sales_total"] or 0.0)
+    gross_sales = ov_sales if ov_sales > 0 else float(ord_sales or 0.0)
     ads = float(ov["ads_campaigns_gross"] or 0.0)
     service_and_comm = float(ov["commissions_fees_gross"] or 0.0)
     total_losses = float(ov["total_costs_gross"] or 0.0)

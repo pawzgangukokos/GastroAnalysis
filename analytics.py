@@ -107,10 +107,9 @@ class GastroAnalytics:
                 FROM orders o
                 JOIN brands b ON o.brand_id = b.id
                 WHERE b.status = 'Active'
-                  AND o.order_datetime >= ?
-                  AND o.order_datetime <= ?
+                  AND date(o.order_datetime) BETWEEN ? AND ?
             """
-            ord_params = [start_bound, end_bound]
+            ord_params = [self.start_date, self.end_date]
             if self.location_id is not None:
                 ord_query += " AND o.location_id = ?"
                 ord_params.append(self.location_id)
@@ -150,19 +149,20 @@ class GastroAnalytics:
 
             # 3. Load Order Items directly from order_items (full-key rejected-order exclusion)
             rej_pairs_query = """
-                SELECT DISTINCT location_id, brand_id, platform, order_id
-                FROM orders
-                WHERE LOWER(TRIM(COALESCE(status, ''))) IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone')
-                  AND order_datetime >= ?
-                  AND order_datetime <= ?
+                SELECT DISTINCT o.location_id, o.brand_id, o.platform, o.order_id
+                FROM orders o
+                JOIN brands b ON o.brand_id = b.id
+                WHERE LOWER(TRIM(COALESCE(b.status, 'active'))) = 'active'
+                  AND LOWER(TRIM(COALESCE(o.status, ''))) IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone')
+                  AND date(o.order_datetime) BETWEEN ? AND ?
             """
-            rej_params = [start_bound, end_bound]
+            rej_params = [self.start_date, self.end_date]
             if self.location_id is not None:
-                rej_pairs_query += " AND location_id = ?"
                 rej_params.append(self.location_id)
+                rej_pairs_query += " AND o.location_id = ?"
             if self.brand_id:
-                rej_pairs_query += " AND brand_id = ?"
                 rej_params.append(self.brand_id)
+                rej_pairs_query += " AND o.brand_id = ?"
 
             rej_rows = conn.execute(rej_pairs_query, tuple(rej_params)).fetchall()
             rejected_keys = {(r[0], r[1], r[2], r[3]) for r in rej_rows}
@@ -172,10 +172,9 @@ class GastroAnalytics:
                 FROM order_items oi
                 JOIN brands b ON oi.brand_id = b.id
                 WHERE b.status = 'Active'
-                  AND oi.order_datetime >= ?
-                  AND oi.order_datetime <= ?
+                  AND date(oi.order_datetime) BETWEEN ? AND ?
             """
-            items_params = [start_bound, end_bound]
+            items_params = [self.start_date, self.end_date]
             if self.location_id is not None:
                 items_query += " AND oi.location_id = ?"
                 items_params.append(self.location_id)
@@ -334,10 +333,12 @@ class GastroAnalytics:
         if not comp_df.empty:
             for (bid, d_str), grp in comp_df.groupby(['brand_id', 'date']):
                 rated = grp['rating'].dropna()
+                items_num = pd.to_numeric(grp['items_count'], errors='coerce').fillna(0)
+                sales_num = pd.to_numeric(grp['total_sales'], errors='coerce').fillna(0.0)
                 comp_grp[(int(bid), str(d_str))] = {
                     "orders": int(len(grp)),
-                    "items": int(grp['items_count'].sum()),
-                    "revenue": float(grp['total_sales'].sum()),
+                    "items": int(items_num.sum()),
+                    "revenue": float(sales_num.sum()),
                     "rating": round(float(rated.mean()), 2) if not rated.empty else None
                 }
 
@@ -349,6 +350,7 @@ class GastroAnalytics:
                     "lost_rev": float(grp['total_sales'].sum())
                 }
 
+        weekday_cache = {}
         rows = []
         for bid, d_str in sorted(pairs, key=lambda x: (x[1], brand_name_map.get(x[0], "")), reverse=True):
             b_name = brand_name_map.get(bid, f"Brand #{bid}")
@@ -360,7 +362,9 @@ class GastroAnalytics:
             rev = round(c_info["revenue"], 2)
             aov = round(rev / comp_orders, 2) if comp_orders > 0 else 0.00
             rating_disp = f"{c_info['rating']:.2f}" if c_info["rating"] is not None else "—"
-            weekday_str = pd.to_datetime(d_str).day_name()
+            if d_str not in weekday_cache:
+                weekday_cache[d_str] = datetime.strptime(d_str, "%Y-%m-%d").strftime("%A")
+            weekday_str = weekday_cache[d_str]
 
             rows.append({
                 "Date": d_str,

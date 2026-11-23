@@ -18,6 +18,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from database import init_db, backup_db, restore_db, get_connection, log_error, BACKUP_DIR
 from importer import CSVImporter, UnrecognizedCSVFormatError, merge_brands, import_day_folder_recursive
+import brand_service
 from analytics import GastroAnalytics, get_location_date_bounds
 from importer import import_payouts_recursive
 from payout_analytics import get_loss_summary, get_payout_breakdown_by_brand_and_platform
@@ -161,10 +162,10 @@ class UserGuideDialog(ctk.CTkToplevel):
         self.geometry("780x620")
         self.transient(parent)
         self.configure(fg_color=PALETTE[theme_mode]["canvas"])
-        
+
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=20, pady=20)
-        
+
         guide_text = """
 1. WHAT THIS APP DOES (SIMPLE OVERVIEW)
 GastroAnalytics helps you understand how your kitchen and delivery channels perform:
@@ -323,10 +324,10 @@ class CustomMapperDialog(ctk.CTkToplevel):
 
         grid_card = ctk.CTkFrame(self, fg_color=self.t["card"])
         grid_card.pack(fill="x", padx=24, pady=10)
-        
+
         fields = [
             "Order Date/Time", "Order ID", "Venue/Brand Name",
-            "Items Count or Items Text", "Sales Amount (Gross)", "Sales Amount (Net)", 
+            "Items Count or Items Text", "Sales Amount (Gross)", "Sales Amount (Net)",
             "Status", "Customer Rating"
         ]
         for idx, field in enumerate(fields):
@@ -341,7 +342,7 @@ class CustomMapperDialog(ctk.CTkToplevel):
     @safe_action
     def _load_file(self, path: str):
         importer = CSVImporter()
-        self.df = importer.sniff_csv(path)
+        self.df = importer.sniff_table(path)
         cols = ["(Ignore)"] + list(self.df.columns)
         for cb in self.mapper_dropdowns.values():
             cb.configure(values=cols)
@@ -404,7 +405,7 @@ class GastroAnalyticsApp(ctk.CTk):
         self.title("GastroAnalytics")
         self.geometry("1440x900")
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
-        
+
         self.active_figures = []
         self.top_dishes_win = None
         self.current_top_dishes = []
@@ -451,7 +452,6 @@ class GastroAnalyticsApp(ctk.CTk):
             self.destroy()
         except Exception:
             pass
-        sys.exit(0)
 
     def _t(self) -> dict:
         return PALETTE[self.theme_mode]
@@ -520,7 +520,7 @@ class GastroAnalyticsApp(ctk.CTk):
         self.sidebar.grid_rowconfigure(6, weight=1)
 
         ctk.CTkLabel(self.sidebar, text="GastroAnalytics", font=self.font_title).grid(row=0, column=0, padx=20, pady=24, sticky="w")
-        
+
         self.nav_buttons = {}
         nav_items = [
             ("dashboard", "Dashboard"),
@@ -542,7 +542,7 @@ class GastroAnalyticsApp(ctk.CTk):
 
         self.restore_btn = ctk.CTkButton(self.sidebar, text="Restore Backup", command=lambda: RestoreBackupDialog(self, self.theme_mode, self._on_database_restored), fg_color="transparent", text_color=t["text"], border_width=1, border_color=t["ghost_border"])
         self.restore_btn.grid(row=9, column=0, padx=14, pady=(8, 20), sticky="ew")
-        
+
         self.frames = {
             "dashboard": ctk.CTkFrame(self, fg_color="transparent"),
             "daily": ctk.CTkFrame(self, fg_color="transparent"),
@@ -558,13 +558,67 @@ class GastroAnalyticsApp(ctk.CTk):
 
     def _toggle_theme(self):
         self._close_active_figures()
+        saved_state = {
+            "dash_start": self.dash_start_entry.get() if hasattr(self, "dash_start_entry") else None,
+            "dash_end": self.dash_end_entry.get() if hasattr(self, "dash_end_entry") else None,
+            "dash_loc": self.dash_location_cb.get() if hasattr(self, "dash_location_cb") else None,
+            "dash_brand": self.dash_brand_cb.get() if hasattr(self, "dash_brand_cb") else None,
+            "daily_start": self.daily_start_entry.get() if hasattr(self, "daily_start_entry") else None,
+            "daily_end": self.daily_end_entry.get() if hasattr(self, "daily_end_entry") else None,
+            "daily_loc": self.daily_location_cb.get() if hasattr(self, "daily_location_cb") else None,
+            "daily_brand": self.daily_brand_cb.get() if hasattr(self, "daily_brand_cb") else None,
+            "daily_scope": self.daily_scope_seg.get() if hasattr(self, "daily_scope_seg") else None,
+            "cal_start": self.cal_start_entry.get() if hasattr(self, "cal_start_entry") else None,
+            "cal_end": self.cal_end_entry.get() if hasattr(self, "cal_end_entry") else None,
+            "fin_from": self.fin_date_from.get() if hasattr(self, "fin_date_from") else None,
+            "fin_to": self.fin_date_to.get() if hasattr(self, "fin_date_to") else None,
+            "fin_plat": self.fin_platform_var.get() if hasattr(self, "fin_platform_var") else None,
+            "import_log": self.import_log_box.get("1.0", "end").strip() if hasattr(self, "import_log_box") and self.import_log_box.winfo_exists() else "",
+        }
         self.theme_mode = "Dark" if self.theme_mode == "Light" else "Light"
         ctk.set_appearance_mode(self.theme_mode)
         for w in self.winfo_children():
             w.destroy()
         self._build_layout()
         self._populate_global_dropdowns()
-        self.show_tab(self.current_tab)
+
+        def _restore_entry(widget, val):
+            if val is not None and hasattr(self, widget):
+                ent = getattr(self, widget)
+                ent.delete(0, "end")
+                ent.insert(0, val)
+
+        def _restore_cb(widget, val):
+            if val and hasattr(self, widget):
+                cb = getattr(self, widget)
+                if val in cb.cget("values"):
+                    cb.set(val)
+
+        _restore_entry("dash_start_entry", saved_state["dash_start"])
+        _restore_entry("dash_end_entry", saved_state["dash_end"])
+        _restore_cb("dash_location_cb", saved_state["dash_loc"])
+        self._on_dash_location_change(self.dash_location_cb.get())
+        _restore_cb("dash_brand_cb", saved_state["dash_brand"])
+
+        _restore_entry("daily_start_entry", saved_state["daily_start"])
+        _restore_entry("daily_end_entry", saved_state["daily_end"])
+        if saved_state["daily_scope"] and hasattr(self, "daily_scope_seg"):
+            self.daily_scope_seg.set(saved_state["daily_scope"])
+        _restore_cb("daily_location_cb", saved_state["daily_loc"])
+        self._on_daily_location_change(self.daily_location_cb.get())
+        _restore_cb("daily_brand_cb", saved_state["daily_brand"])
+
+        _restore_entry("cal_start_entry", saved_state["cal_start"])
+        _restore_entry("cal_end_entry", saved_state["cal_end"])
+        _restore_entry("fin_date_from", saved_state["fin_from"])
+        _restore_entry("fin_date_to", saved_state["fin_to"])
+        if saved_state["fin_plat"] and hasattr(self, "fin_platform_var"):
+            self.fin_platform_var.set(saved_state["fin_plat"])
+
+        if saved_state["import_log"]:
+            self._append_import_log(saved_state["import_log"])
+
+        self.show_tab(self.current_tab, force=True)
 
     def mark_tabs_dirty(self, *tabs: str, clear_cache: bool = False):
         if clear_cache and hasattr(self, "invalidate_analytics_cache"):
@@ -651,15 +705,15 @@ class GastroAnalyticsApp(ctk.CTk):
         self.dash_location_cb.pack(side="left", padx=10, pady=10)
         self.dash_brand_cb = ctk.CTkComboBox(top_bar, values=["All Brands Combined"])
         self.dash_brand_cb.pack(side="left", padx=10, pady=10)
-        
+
         self.dash_start_entry = ctk.CTkEntry(top_bar, width=105)
         self.dash_start_entry.insert(0, (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
         self.dash_start_entry.pack(side="left", padx=5, pady=10)
-        
+
         self.dash_end_entry = ctk.CTkEntry(top_bar, width=105)
         self.dash_end_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
         self.dash_end_entry.pack(side="left", padx=5, pady=10)
-        
+
         ctk.CTkButton(top_bar, text="Apply", command=self.refresh_dashboard).pack(side="left", padx=10)
         ctk.CTkButton(top_bar, text="Export PDF", command=self.export_pdf_report, fg_color="transparent", border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=10)
         ctk.CTkButton(top_bar, text="Export .xlsx", command=self.export_excel_report, fg_color="transparent", border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=10)
@@ -674,7 +728,7 @@ class GastroAnalyticsApp(ctk.CTk):
         kpi_grid.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         for c in range(4):
             kpi_grid.grid_columnconfigure(c, weight=1, uniform="kpi8")
-        
+
         self.kpi_cards = {}
         kpi_specs = [
             ("revenue", "Total Revenue & AOV"),
@@ -686,7 +740,7 @@ class GastroAnalyticsApp(ctk.CTk):
             ("worst_weekday", "Quietest Weekday"),
             ("rating", "Customer Rating & Rush Impact")
         ]
-        
+
         for idx, (key, title) in enumerate(kpi_specs):
             r, c = divmod(idx, 4)
             card = ctk.CTkFrame(kpi_grid, fg_color=t["card"], corner_radius=8)
@@ -718,7 +772,7 @@ class GastroAnalyticsApp(ctk.CTk):
         hm_card = ctk.CTkFrame(self.dash_scroll, fg_color=t["card"])
         hm_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         hm_card.grid_columnconfigure(0, weight=1)
-        
+
         hm_header = ctk.CTkFrame(hm_card, fg_color="transparent")
         hm_header.grid(row=0, column=0, sticky="ew", padx=16, pady=10)
         ctk.CTkLabel(hm_header, text="30-Minute HR Staffing Heatmap", font=self.font_section).pack(side="left")
@@ -752,6 +806,7 @@ class GastroAnalyticsApp(ctk.CTk):
 
         loc_name = self.dash_location_cb.get()
         if loc_name != "All Locations (All Active)" and loc_name not in self.location_map:
+            messagebox.showwarning("Unknown Location", f"Location '{loc_name}' is not available.")
             return
         loc_id, brand_id = self._get_selected_ids(loc_name, self.dash_brand_cb.get())
 
@@ -790,7 +845,7 @@ class GastroAnalyticsApp(ctk.CTk):
         self.kpi_cards["weekday"][1].configure(text="Highest average volume")
         self.kpi_cards["worst_weekday"][0].configure(text=kpis['Worst Weekday (Avg)'])
         self.kpi_cards["worst_weekday"][1].configure(text="Lowest average volume")
-        
+
         self.kpi_cards["rating"][0].configure(text=f"{kpis['Overall Average Rating']} / 5.0")
         self.kpi_cards["rating"][1].configure(text=f"Rush {kpis['Rating - Peak Rush']} vs Off {kpis['Rating - Off-Peak']}")
 
@@ -1193,6 +1248,7 @@ class GastroAnalyticsApp(ctk.CTk):
     def refresh_daily_breakdown(self, force: bool = False):
         loc_name = self.daily_location_cb.get()
         if loc_name != "All Locations (All Active)" and loc_name not in self.location_map:
+            messagebox.showwarning("Unknown Location", f"Location '{loc_name}' is not available.")
             return
         loc_id, brand_id = self._get_selected_ids(loc_name, self.daily_brand_cb.get())
 
@@ -1332,14 +1388,14 @@ class GastroAnalyticsApp(ctk.CTk):
         cal_card.grid(row=1, column=0, rowspan=2, sticky="nsew")
         cal_card.grid_columnconfigure(0, weight=1)
         cal_card.grid_rowconfigure(2, weight=1)
-        
+
         cal_filter = ctk.CTkFrame(cal_card, fg_color="transparent")
         cal_filter.grid(row=0, column=0, sticky="ew", padx=14, pady=12)
         self.cal_location_cb = ctk.CTkComboBox(cal_filter, command=self._on_cal_location_change)
         self.cal_location_cb.pack(side="left", padx=4)
         self.cal_brand_cb = ctk.CTkComboBox(cal_filter)
         self.cal_brand_cb.pack(side="left", padx=4)
-        
+
         self.cal_start_entry, self.cal_end_entry = ctk.CTkEntry(cal_filter, width=100), ctk.CTkEntry(cal_filter, width=100)
         self.cal_start_entry.insert(0, (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
         self.cal_end_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
@@ -1349,7 +1405,7 @@ class GastroAnalyticsApp(ctk.CTk):
 
         edit_bar = ctk.CTkFrame(cal_card, fg_color="transparent")
         edit_bar.grid(row=1, column=0, sticky="ew", padx=14, pady=10)
-        
+
         self.cal_status_cb = ctk.CTkComboBox(edit_bar, values=["Open", "Closed", "Disrupted"], width=120)
         self.cal_status_cb.pack(side="left", padx=10)
         self.cal_open_entry = ctk.CTkEntry(edit_bar, width=62)
@@ -1369,12 +1425,19 @@ class GastroAnalyticsApp(ctk.CTk):
         self.cal_tree.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 14))
 
     def _append_import_log(self, line: str):
-        self.import_log_box.configure(state="normal")
-        self.import_log_box.insert("end", line + "\n")
-        self.import_log_box.see("end")
-        self.import_log_box.configure(state="disabled")
+        box = getattr(self, "import_log_box", None)
+        if box is None:
+            return
+        try:
+            if not box.winfo_exists():
+                return
+            box.configure(state="normal")
+            box.insert("end", line + chr(10))
+            box.see("end")
+            box.configure(state="disabled")
+        except Exception:
+            pass
 
-    @safe_action
     def _one_click_import(self):
         filepaths = filedialog.askopenfilenames(title="Import CSV", filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
         if not filepaths:
@@ -1411,8 +1474,9 @@ class GastroAnalyticsApp(ctk.CTk):
     def refresh_calendar_table(self):
         start_d, end_d = self.cal_start_entry.get().strip(), self.cal_end_entry.get().strip()
         if not validate_date(start_d) or not validate_date(end_d) or start_d > end_d:
+            messagebox.showwarning("Invalid Date", "Check YYYY-MM-DD format and ensure Start <= End.")
             return
-        
+
         self.cal_tree.delete(*self.cal_tree.get_children())
         loc_id, brand_id = self._get_selected_ids(self.cal_location_cb.get(), self.cal_brand_cb.get(), False)
         if not loc_id or not brand_id:
@@ -1421,8 +1485,8 @@ class GastroAnalyticsApp(ctk.CTk):
         date_range = pd.date_range(start_d, end_d)
         with contextlib.closing(get_connection()) as conn:
             cal_rows = conn.execute("SELECT date, status, open_time, close_time, COALESCE(notes, '') as notes FROM operating_calendar WHERE location_id = ? AND brand_id = ? AND date BETWEEN ? AND ?", (loc_id, brand_id, start_d, end_d)).fetchall()
-            ord_rows = conn.execute("SELECT date(order_datetime) as d, COUNT(*) as cnt FROM orders WHERE location_id = ? AND brand_id = ? AND LOWER(status) NOT IN ('rejected', 'cancelled', 'refunded', 'void') AND date(order_datetime) BETWEEN ? AND ? GROUP BY d", (loc_id, brand_id, start_d, end_d)).fetchall()
-        
+            ord_rows = conn.execute("SELECT date(order_datetime) as d, COUNT(*) as cnt FROM orders WHERE location_id = ? AND brand_id = ? AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone') AND date(order_datetime) BETWEEN ? AND ? GROUP BY d", (loc_id, brand_id, start_d, end_d)).fetchall()
+
         cal_map = {r['date']: dict(r) for r in cal_rows}
         ord_map = {r['d']: r['cnt'] for r in ord_rows}
         for dt in date_range:
@@ -1437,7 +1501,11 @@ class GastroAnalyticsApp(ctk.CTk):
             return
         loc_id, brand_id = self._get_selected_ids(self.cal_location_cb.get(), self.cal_brand_cb.get(), False)
         status = self.cal_status_cb.get()
-        open_t, close_t = self.cal_open_entry.get().strip() or "10:00", self.cal_close_entry.get().strip() or "22:00"
+        open_t = self.cal_open_entry.get().strip() or "10:00"
+        close_t = self.cal_close_entry.get().strip() or "22:00"
+        if not validate_hhmm(open_t) or not validate_hhmm(close_t):
+            messagebox.showwarning("Invalid Time", "Enter valid hours in HH:MM format (e.g. 10:00 and 22:00).")
+            return
         notes = self.cal_notes_entry.get().strip()
 
         with contextlib.closing(get_connection()) as conn:
@@ -1466,13 +1534,13 @@ class GastroAnalyticsApp(ctk.CTk):
         self.set_tabs.grid(row=0, column=0, sticky="nsew")
         for tab_name in ["Import", "Restaurants & Brands", "Staffing Rules", "Meal Shifts", "Exclusions"]:
             self.set_tabs.add(tab_name)
-        
+
         self._build_settings_import_subtab(self.set_tabs.tab("Import"))
         self._build_settings_entities_subtab(self.set_tabs.tab("Restaurants & Brands"))
         self._build_settings_hr_subtab(self.set_tabs.tab("Staffing Rules"))
         self._build_settings_shifts_subtab(self.set_tabs.tab("Meal Shifts"))
         self._build_settings_exclusions_subtab(self.set_tabs.tab("Exclusions"))
-        
+
 
     def _build_settings_import_subtab(self, tab):
         t = self._t()
@@ -1554,121 +1622,231 @@ class GastroAnalyticsApp(ctk.CTk):
     def _build_settings_entities_subtab(self, tab):
         t = self._t()
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(3, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
 
-        # Row 0: Locations (Groups) & Adding New Restaurants
-        loc_brand_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
-        loc_brand_card.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        # Row 0: Quick create (Location & Brand)
+        top_bar = ctk.CTkFrame(tab, fg_color=t["canvas"])
+        top_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
 
-        ctk.CTkLabel(loc_brand_card, text="New Location:", font=self.font_bold).pack(side="left", padx=(10, 4), pady=8)
-        self.new_loc_entry = ctk.CTkEntry(loc_brand_card, placeholder_text="e.g. MSIDA", width=135)
+        ctk.CTkLabel(top_bar, text="Location:", font=self.font_bold).pack(side="left", padx=(10, 4), pady=8)
+        self.new_loc_entry = ctk.CTkEntry(top_bar, placeholder_text="e.g. Sliema", width=130)
         self.new_loc_entry.pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(loc_brand_card, text="Create Location", width=115, command=self._add_location).pack(side="left", padx=(4, 14), pady=8)
+        ctk.CTkButton(top_bar, text="+ Loc", width=65, command=self._add_location).pack(side="left", padx=(4, 14), pady=8)
 
-        ctk.CTkLabel(loc_brand_card, text="Add Restaurant:", font=self.font_bold).pack(side="left", padx=(4, 4), pady=8)
-        self.new_brand_loc_cb = ctk.CTkComboBox(loc_brand_card, width=135)
+        ctk.CTkLabel(top_bar, text="Brand:", font=self.font_bold).pack(side="left", padx=(4, 4), pady=8)
+        self.new_brand_loc_cb = ctk.CTkComboBox(top_bar, width=130)
         self.new_brand_loc_cb.pack(side="left", padx=4, pady=8)
-        self.new_brand_name_entry = ctk.CTkEntry(loc_brand_card, placeholder_text="Restaurant Name", width=150)
+        self.new_brand_name_entry = ctk.CTkEntry(top_bar, placeholder_text="Brand name", width=160)
         self.new_brand_name_entry.pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(loc_brand_card, text="Add", width=70, command=self._add_brand).pack(side="left", padx=4, pady=8)
+        ctk.CTkButton(top_bar, text="+ Brand", width=75, command=self._add_brand).pack(side="left", padx=4, pady=8)
 
         ctk.CTkButton(
-            loc_brand_card,
-            text="Delete Location",
-            width=115,
+            top_bar,
+            text="Delete Brand",
+            width=105,
             fg_color=t["danger"],
             hover_color=t["danger_hover"],
-            command=self._delete_location
+            command=self._delete_brand,
         ).pack(side="right", padx=(4, 10), pady=8)
-        self.del_loc_cb = ctk.CTkComboBox(loc_brand_card, width=135)
-        self.del_loc_cb.pack(side="right", padx=4, pady=8)
 
-        # Row 1: Group / Move Selected Restaurants into a Location, Edit Name/Status, or Delete
-        edit_brand_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
-        edit_brand_card.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-
-        ctk.CTkLabel(edit_brand_card, text="Assign Selected to Location:", font=self.font_bold).pack(side="left", padx=(10, 4), pady=8)
-        self.move_brand_loc_cb = ctk.CTkComboBox(edit_brand_card, width=140)
-        self.move_brand_loc_cb.pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(edit_brand_card, text="Move Selected", width=110, command=self._move_selected_brands_to_location).pack(side="left", padx=(4, 16), pady=8)
-
-        ctk.CTkLabel(edit_brand_card, text="Edit:", font=self.font_bold).pack(side="left", padx=(4, 4), pady=8)
-        self.edit_brand_name_entry = ctk.CTkEntry(edit_brand_card, placeholder_text="Select row below", width=170)
-        self.edit_brand_name_entry.pack(side="left", padx=4, pady=8)
-        self.edit_brand_status_cb = ctk.CTkComboBox(edit_brand_card, values=["Active", "Inactive"], width=100)
-        self.edit_brand_status_cb.pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(edit_brand_card, text="Save", width=75, command=self._update_selected_brand).pack(side="left", padx=4, pady=8)
-
+        self.del_loc_cb = ctk.CTkComboBox(top_bar, width=120)
+        self.del_loc_cb.pack(side="right", padx=2, pady=8)
         ctk.CTkButton(
-            edit_brand_card,
-            text="Delete Restaurant",
-            width=130,
+            top_bar,
+            text="Del Loc",
+            width=70,
             fg_color=t["danger"],
             hover_color=t["danger_hover"],
-            command=self._delete_brand
-        ).pack(side="right", padx=10, pady=8)
+            command=self._delete_location,
+        ).pack(side="right", padx=(8, 2), pady=8)
 
-        # Row 2: Simple Layman Wizard — Combine Duplicate Restaurant Names
-        combine_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
-        combine_card.grid(row=2, column=0, sticky="ew", padx=10, pady=6)
-        combine_card.grid_columnconfigure(0, weight=1)
+        # Row 1: Unmapped / Pending Aliases & Active Aliases (minimal controls)
+        alias_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
+        alias_card.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        alias_card.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            combine_card,
-            text="Combine Duplicate Restaurant Names",
-            font=self.font_bold,
-            text_color=t["text"]
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        head = ctk.CTkFrame(alias_card, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        ctk.CTkLabel(head, text="Unmapped / Pending Names", font=self.font_bold).pack(side="left")
 
-        ctk.CTkLabel(
-            combine_card,
-            text="If Wolt or Bolt spells your restaurant name differently (e.g. 'Burger House' and 'Burger House - City Center'), select the duplicate name below and merge it into your main brand. All past and future orders will automatically combine.",
-            font=self.font_small,
-            text_color=t["muted"],
-            justify="left",
-            wraplength=980
-        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        self.auto_create_brand_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            head,
+            text="Auto-create new brands on import",
+            variable=self.auto_create_brand_var,
+            command=self._toggle_auto_create_brands,
+        ).pack(side="left", padx=14)
 
-        combine_row = ctk.CTkFrame(combine_card, fg_color="transparent")
-        combine_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkButton(head, text="Re-apply", width=85, command=self._reapply_aliases_action).pack(side="right")
 
-        self.combine_dup_cb = ctk.CTkComboBox(combine_row, width=260)
-        self.combine_dup_cb.pack(side="left", padx=(0, 8))
+        u_cols = ("Name", "Platform", "Orders", "Orders EUR", "Reports", "Reports EUR", "Status")
+        u_wrap = ctk.CTkFrame(alias_card, fg_color="transparent")
+        u_wrap.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+        u_wrap.grid_columnconfigure(0, weight=1)
+        self.unmapped_tree = ttk.Treeview(u_wrap, columns=u_cols, show="headings", height=3, selectmode="browse")
+        for c in u_cols:
+            self.unmapped_tree.heading(c, text=c)
+            self.unmapped_tree.column(c, width=190 if c == "Name" else 95, anchor="w")
+        u_vsb = ttk.Scrollbar(u_wrap, orient="vertical", command=self.unmapped_tree.yview)
+        self.unmapped_tree.configure(yscrollcommand=u_vsb.set)
+        self.unmapped_tree.grid(row=0, column=0, sticky="ew")
+        u_vsb.grid(row=0, column=1, sticky="ns")
+        self.unmapped_tree.bind("<<TreeviewSelect>>", self._on_unmapped_tree_select)
 
-        ctk.CTkLabel(combine_row, text="Merge into:", font=self.font_bold).pack(side="left", padx=6)
+        act_row = ctk.CTkFrame(alias_card, fg_color="transparent")
+        act_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.alias_raw_name_entry = ctk.CTkEntry(act_row, placeholder_text="Alias name", width=180)
+        self.alias_raw_name_entry.pack(side="left", padx=(0, 6))
+        self.alias_target_brand_cb = ctk.CTkComboBox(act_row, width=210)
+        self.alias_target_brand_cb.pack(side="left", padx=4)
+        ctk.CTkButton(act_row, text="Assign", width=80, command=self._assign_selected_alias).pack(side="left", padx=4)
+        ctk.CTkButton(act_row, text="Later", width=65, command=self._defer_selected_unmapped).pack(side="left", padx=4)
 
-        self.combine_main_cb = ctk.CTkComboBox(combine_row, width=260)
-        self.combine_main_cb.pack(side="left", padx=8)
+        self.new_alias_brand_entry = ctk.CTkEntry(act_row, placeholder_text="New brand...", width=130)
+        self.new_alias_brand_entry.pack(side="left", padx=(12, 4))
+        ctk.CTkButton(act_row, text="+ Create & Map", width=110, command=self._create_brand_for_alias).pack(side="left", padx=4)
 
+        rem_row = ctk.CTkFrame(alias_card, fg_color="transparent")
+        rem_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+        ctk.CTkLabel(rem_row, text="Active Alias:", font=self.font_bold).pack(side="left", padx=(0, 6))
+        self.active_alias_cb = ctk.CTkComboBox(rem_row, width=380)
+        self.active_alias_cb.pack(side="left", padx=4)
         ctk.CTkButton(
-            combine_row,
-            text="Combine Names",
-            width=140,
-            command=self._combine_duplicate_names
-        ).pack(side="left", padx=10)
+            rem_row,
+            text="Remove Alias",
+            width=105,
+            fg_color=t["danger"],
+            hover_color=t["danger_hover"],
+            command=self._remove_selected_alias,
+        ).pack(side="left", padx=6)
 
-        # Row 3: Brands Table (supports Ctrl/Shift multi-select to group multiple restaurants into one location)
-        cols = ("ID", "Location", "Brand", "Status")
-        self.brands_tree = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
-        for c in cols:
+        # Row 2: Brands list
+        b_cols = ("ID", "Location", "Brand", "Status")
+        b_wrap = ctk.CTkFrame(tab, fg_color="transparent")
+        b_wrap.grid(row=2, column=0, sticky="nsew", padx=10, pady=(4, 10))
+        b_wrap.grid_columnconfigure(0, weight=1)
+        b_wrap.grid_rowconfigure(0, weight=1)
+        self.brands_tree = ttk.Treeview(b_wrap, columns=b_cols, show="headings", selectmode="browse")
+        for c in b_cols:
             self.brands_tree.heading(c, text=c)
-        self.brands_tree.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
+        b_vsb = ttk.Scrollbar(b_wrap, orient="vertical", command=self.brands_tree.yview)
+        self.brands_tree.configure(yscrollcommand=b_vsb.set)
+        self.brands_tree.grid(row=0, column=0, sticky="nsew")
+        b_vsb.grid(row=0, column=1, sticky="ns")
         self.brands_tree.bind("<<TreeviewSelect>>", self._on_brand_tree_select)
 
+    def _refresh_after_brand_change(self):
+        if hasattr(self, "invalidate_analytics_cache"):
+            self.invalidate_analytics_cache()
+        if hasattr(self, "mark_tabs_dirty"):
+            self.mark_tabs_dirty()
+        self._last_dashboard_key = None
+        if hasattr(self, "_last_daily_key"):
+            self._last_daily_key = None
+        self._populate_global_dropdowns()
+        self.refresh_all_settings()
+        for fn_name in ("refresh_dashboard", "refresh_daily_breakdown", "refresh_finances_tab"):
+            fn = getattr(self, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(force=True)
+                except TypeError:
+                    fn()
+
     def _on_brand_tree_select(self, _event=None):
-        sel = self.brands_tree.selection()
+        return
+
+    def _on_unmapped_tree_select(self, _event=None):
+        sel = self.unmapped_tree.selection()
         if not sel:
             return
-        vals = self.brands_tree.item(sel[0], "values")
-        self.edit_brand_name_entry.delete(0, "end")
-        self.edit_brand_name_entry.insert(0, vals[2])
-        self.edit_brand_status_cb.set(vals[3])
+        vals = self.unmapped_tree.item(sel[0], "values")
+        if vals and hasattr(self, "alias_raw_name_entry"):
+            self.alias_raw_name_entry.delete(0, "end")
+            self.alias_raw_name_entry.insert(0, vals[0])
+
+    @safe_action
+    def _toggle_auto_create_brands(self):
+        brand_service.set_auto_create_brands_setting(bool(self.auto_create_brand_var.get()))
+
+    @safe_action
+    def _reapply_aliases_action(self):
+        stats = brand_service.reapply_all_brand_aliases()
+        self._refresh_after_brand_change()
+        messagebox.showinfo(
+            "Re-applied",
+            f"Orders: {stats.get('updated_orders', 0)}, "
+            f"Reports: {stats.get('updated_reports', 0)}, "
+            f"Cost items: {stats.get('updated_cost_items', 0)}."
+        )
+
+    @safe_action
+    def _assign_selected_alias(self):
+        raw_name = self.alias_raw_name_entry.get().strip()
+        target_label = self.alias_target_brand_cb.get().strip()
+        target_id = getattr(self, "alias_brand_id_map", {}).get(target_label)
+        if not raw_name or not target_id:
+            messagebox.showwarning("Missing Selection", "Select or enter an alias name and pick a brand.")
+            return
+        platform = ""
+        sel = self.unmapped_tree.selection()
+        if sel:
+            vals = self.unmapped_tree.item(sel[0], "values")
+            if vals and vals[0] == raw_name:
+                platform = str(vals[1] or "")
+        res = brand_service.assign_alias_to_brand(raw_name, int(target_id), platform=platform, reapply=True)
+        self._refresh_after_brand_change()
+        messagebox.showinfo("Assigned", f"'{raw_name}' -> '{res['brand_name']}'.")
+
+    @safe_action
+    def _create_brand_for_alias(self):
+        new_brand = self.new_alias_brand_entry.get().strip()
+        raw_name = self.alias_raw_name_entry.get().strip() or new_brand
+        if not new_brand:
+            messagebox.showwarning("Missing Name", "Enter a new brand name.")
+            return
+        platform = ""
+        sel = self.unmapped_tree.selection()
+        if sel:
+            vals = self.unmapped_tree.item(sel[0], "values")
+            if vals and vals[0] == raw_name:
+                platform = str(vals[1] or "")
+        res = brand_service.create_brand_and_assign_alias(new_brand, raw_name=raw_name, platform=platform)
+        self.new_alias_brand_entry.delete(0, "end")
+        self._refresh_after_brand_change()
+        messagebox.showinfo("Created", f"Created '{res['brand_name']}' and mapped '{raw_name}'.")
+
+    @safe_action
+    def _defer_selected_unmapped(self):
+        raw_name = self.alias_raw_name_entry.get().strip()
+        if not raw_name:
+            messagebox.showwarning("No Selection", "Select a name to assign later.")
+            return
+        platform = ""
+        sel = self.unmapped_tree.selection()
+        if sel:
+            vals = self.unmapped_tree.item(sel[0], "values")
+            if vals and vals[0] == raw_name:
+                platform = str(vals[1] or "")
+        brand_service.defer_unmapped_brand(raw_name, platform=platform)
+        self.refresh_all_settings()
+
+    @safe_action
+    def _remove_selected_alias(self):
+        label = self.active_alias_cb.get().strip()
+        alias_id = getattr(self, "active_alias_id_map", {}).get(label)
+        if not alias_id:
+            messagebox.showwarning("No Selection", "Select an alias to remove.")
+            return
+        brand_service.delete_brand_alias(int(alias_id), unmap_matching_records=True)
+        self._refresh_after_brand_change()
+        messagebox.showinfo("Removed", f"Removed '{label}'.")
 
     @safe_action
     def _add_location(self):
         name = self.new_loc_entry.get().strip()
         if not name:
-            messagebox.showwarning("Missing Name", "Enter a location name (e.g. MSIDA).")
+            messagebox.showwarning("Missing Name", "Enter a location name.")
             return
         with contextlib.closing(get_connection()) as conn:
             conn.execute("INSERT INTO locations (name) VALUES (?)", (name,))
@@ -1676,35 +1854,23 @@ class GastroAnalyticsApp(ctk.CTk):
         self.new_loc_entry.delete(0, "end")
         self._populate_global_dropdowns()
         self.refresh_all_settings()
-        if hasattr(self, 'new_brand_loc_cb'):
-            self.new_brand_loc_cb.set(name)
-        if hasattr(self, 'move_brand_loc_cb'):
-            self.move_brand_loc_cb.set(name)
-        messagebox.showinfo("Location Created", f"Location '{name}' is ready. You can now add or move restaurants into '{name}'.")
 
     @safe_action
     def _delete_location(self):
         loc_name = self.del_loc_cb.get().strip()
         loc_id = self.location_map.get(loc_name)
         if not loc_id:
-            messagebox.showwarning("No Selection", "Please select a valid location to delete.")
+            messagebox.showwarning("No Selection", "Select a location to delete.")
             return
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            f"Are you sure you want to delete location '{loc_name}'?\n\nThis will permanently delete all associated restaurants, orders, and calendar records for this location."
-        ):
+        if not messagebox.askyesno("Confirm Delete", f"Delete location '{loc_name}' and its data?"):
             return
-
         backup_db()
         with contextlib.closing(get_connection()) as conn:
             conn.execute("DELETE FROM order_items WHERE location_id = ?", (loc_id,))
             conn.execute("DELETE FROM locations WHERE id = ?", (loc_id,))
             conn.commit()
-
         self._populate_global_dropdowns()
         self.refresh_all_settings()
-        messagebox.showinfo("Deleted", f"Location '{loc_name}' and all its data have been removed.")
 
     @safe_action
     def _add_brand(self):
@@ -1712,7 +1878,7 @@ class GastroAnalyticsApp(ctk.CTk):
         brand_name = self.new_brand_name_entry.get().strip()
         loc_id = self.location_map.get(loc_name)
         if not loc_id or not brand_name:
-            messagebox.showwarning("Missing Fields", "Select a valid location and enter a restaurant name.")
+            messagebox.showwarning("Missing Fields", "Select a location and enter a brand name.")
             return
         with contextlib.closing(get_connection()) as conn:
             conn.execute("INSERT INTO brands (location_id, name, status) VALUES (?, ?, 'Active')", (loc_id, brand_name))
@@ -1720,164 +1886,25 @@ class GastroAnalyticsApp(ctk.CTk):
         self.new_brand_name_entry.delete(0, "end")
         self._populate_global_dropdowns()
         self.refresh_all_settings()
-        messagebox.showinfo("Restaurant Added", f"'{brand_name}' added to '{loc_name}'.")
-
-    @safe_action
-    def _move_selected_brands_to_location(self):
-        sel = self.brands_tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select one or more restaurants in the table below (hold Ctrl/Cmd to select multiple).")
-            return
-        target_loc_name = self.move_brand_loc_cb.get().strip()
-        target_loc_id = self.location_map.get(target_loc_name)
-        if not target_loc_id:
-            messagebox.showwarning("Invalid Location", "Select a valid target location.")
-            return
-
-        brand_ids = [int(self.brands_tree.item(item_id, "values")[0]) for item_id in sel]
-        backup_db()
-        with contextlib.closing(get_connection()) as conn:
-            cur = conn.cursor()
-            for bid in brand_ids:
-                cur.execute("UPDATE brands SET location_id = ? WHERE id = ?", (target_loc_id, bid))
-                cur.execute("UPDATE orders SET location_id = ? WHERE brand_id = ?", (target_loc_id, bid))
-                cur.execute("UPDATE order_items SET location_id = ? WHERE brand_id = ?", (target_loc_id, bid))
-                cur.execute("UPDATE platform_aliases SET location_id = ? WHERE brand_id = ?", (target_loc_id, bid))
-                cur.execute("UPDATE operating_calendar SET location_id = ? WHERE brand_id = ?", (target_loc_id, bid))
-            conn.commit()
-
-        self._populate_global_dropdowns()
-        self.refresh_all_settings()
-        messagebox.showinfo("Grouped", f"Moved {len(brand_ids)} restaurant(s) to '{target_loc_name}'.")
 
     @safe_action
     def _delete_brand(self):
         sel = self.brands_tree.selection()
         if not sel:
-            messagebox.showwarning("No Selection", "Please select a restaurant in the table below to delete.")
+            messagebox.showwarning("No Selection", "Select a brand row to delete.")
             return
         vals = self.brands_tree.item(sel[0], "values")
         brand_id = int(vals[0])
         brand_name = vals[2]
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            f"Are you sure you want to delete restaurant '{brand_name}'?\n\nThis will permanently remove its orders, dish records, and calendar settings."
-        ):
+        if not messagebox.askyesno("Confirm Delete", f"Delete brand '{brand_name}'?"):
             return
-
         backup_db()
         with contextlib.closing(get_connection()) as conn:
             conn.execute("DELETE FROM order_items WHERE brand_id = ?", (brand_id,))
             conn.execute("DELETE FROM brands WHERE id = ?", (brand_id,))
             conn.commit()
-
-        self.edit_brand_name_entry.delete(0, "end")
         self._populate_global_dropdowns()
         self.refresh_all_settings()
-        messagebox.showinfo("Deleted", f"Restaurant '{brand_name}' has been deleted.")
-
-    @safe_action
-    def _update_selected_brand(self):
-        sel = self.brands_tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select a restaurant row in the table first.")
-            return
-        vals = self.brands_tree.item(sel[0], "values")
-        brand_id = int(vals[0])
-        new_name = self.edit_brand_name_entry.get().strip()
-        new_status = self.edit_brand_status_cb.get()
-        if not new_name:
-            messagebox.showwarning("Invalid Name", "Restaurant name cannot be empty.")
-            return
-        with contextlib.closing(get_connection()) as conn:
-            conn.execute("UPDATE brands SET name = ?, status = ? WHERE id = ?", (new_name, new_status, brand_id))
-            conn.commit()
-        self._populate_global_dropdowns()
-        self.refresh_all_settings()
-        messagebox.showinfo("Saved", "Restaurant details updated.")
-
-    @safe_action
-    def _combine_duplicate_names(self):
-        dup_label = self.combine_dup_cb.get().strip()
-        main_label = self.combine_main_cb.get().strip()
-        if dup_label not in self.duplicate_choice_map or main_label not in self.brand_merge_map:
-            messagebox.showwarning("Selection Needed", "Please select both a duplicate name and a main brand.")
-            return
-
-        dup_info = self.duplicate_choice_map[dup_label]
-        target_brand_id = self.brand_merge_map[main_label]
-        source_brand_id = dup_info["brand_id"]
-
-        if dup_info["kind"] == "brand" and source_brand_id == target_brand_id:
-            messagebox.showwarning("Same Brand", "Please choose two different restaurant names to combine.")
-            return
-
-        if not messagebox.askyesno(
-            "Combine Names",
-            f"Combine '{dup_label}' into '{main_label}'?\n\nAll past and future orders will appear under '{main_label}'."
-        ):
-            return
-
-        moved_orders = 0
-        if dup_info["kind"] == "alias":
-            backup_db()
-            with contextlib.closing(get_connection()) as conn:
-                cur = conn.cursor()
-                target_row = cur.execute("SELECT location_id FROM brands WHERE id = ?", (target_brand_id,)).fetchone()
-                if not target_row:
-                    return
-                target_loc_id = target_row["location_id"]
-                venue_name = dup_info["csv_venue_name"]
-                plat = dup_info["platform"]
-
-                cur.execute(
-                    "UPDATE platform_aliases SET brand_id = ?, location_id = ? WHERE id = ?",
-                    (target_brand_id, target_loc_id, dup_info["alias_id"])
-                )
-
-                matching_orders = cur.execute(
-                    "SELECT order_id, platform, brand_id FROM orders WHERE source_venue_name = ? AND platform = ?",
-                    (venue_name, plat)
-                ).fetchall()
-
-                cur.execute("""
-                    UPDATE OR IGNORE orders
-                    SET brand_id = ?, location_id = ?
-                    WHERE source_venue_name = ? AND platform = ?
-                """, (target_brand_id, target_loc_id, venue_name, plat))
-                moved_orders = cur.rowcount
-
-                cur.execute("""
-                    DELETE FROM orders
-                    WHERE source_venue_name = ? AND platform = ? AND brand_id != ?
-                """, (venue_name, plat, target_brand_id))
-
-                for mo in matching_orders:
-                    cur.execute("""
-                        UPDATE OR IGNORE order_items
-                        SET brand_id = ?, location_id = ?
-                        WHERE order_id = ? AND platform = ? AND brand_id = ?
-                    """, (target_brand_id, target_loc_id, mo["order_id"], mo["platform"], mo["brand_id"]))
-                    cur.execute("""
-                        DELETE FROM order_items
-                        WHERE order_id = ? AND platform = ? AND brand_id = ? AND brand_id != ?
-                    """, (mo["order_id"], mo["platform"], mo["brand_id"], target_brand_id))
-
-                if source_brand_id != target_brand_id:
-                    rem_orders = cur.execute("SELECT COUNT(*) FROM orders WHERE brand_id = ?", (source_brand_id,)).fetchone()[0]
-                    rem_aliases = cur.execute("SELECT COUNT(*) FROM platform_aliases WHERE brand_id = ?", (source_brand_id,)).fetchone()[0]
-                    if rem_orders == 0 and rem_aliases == 0:
-                        cur.execute("DELETE FROM operating_calendar WHERE brand_id = ?", (source_brand_id,))
-                        cur.execute("DELETE FROM brands WHERE id = ?", (source_brand_id,))
-
-                conn.commit()
-        else:
-            moved_orders = merge_brands(source_brand_id, target_brand_id)
-
-        self.refresh_all_settings()
-        self._populate_global_dropdowns()
-        messagebox.showinfo("Names Combined", f"Successfully combined into '{main_label}' ({moved_orders} past orders updated).")
 
     # --- Staffing Rules CRUD ---
     def _build_settings_hr_subtab(self, tab):
@@ -1911,10 +1938,17 @@ class GastroAnalyticsApp(ctk.CTk):
         ctk.CTkButton(form, text="Save Rule", width=110, command=self._save_staffing_rule).pack(side="right", padx=10, pady=10)
 
         cols = ("ID", "Min Load", "Max Load", "Metric", "Suggested Cooks", "Label")
-        self.hr_tree = ttk.Treeview(tab, columns=cols, show="headings", selectmode="browse")
+        hr_tbl_wrap = ctk.CTkFrame(tab, fg_color="transparent")
+        hr_tbl_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        hr_tbl_wrap.grid_columnconfigure(0, weight=1)
+        hr_tbl_wrap.grid_rowconfigure(0, weight=1)
+        self.hr_tree = ttk.Treeview(hr_tbl_wrap, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             self.hr_tree.heading(c, text=c)
-        self.hr_tree.grid(row=1, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        hr_vsb = ttk.Scrollbar(hr_tbl_wrap, orient="vertical", command=self.hr_tree.yview)
+        self.hr_tree.configure(yscrollcommand=hr_vsb.set)
+        self.hr_tree.grid(row=0, column=0, sticky="nsew")
+        hr_vsb.grid(row=0, column=1, sticky="ns")
         self.hr_tree.bind("<<TreeviewSelect>>", self._on_hr_tree_select)
 
     def _on_hr_tree_select(self, _event=None):
@@ -2017,10 +2051,17 @@ class GastroAnalyticsApp(ctk.CTk):
         ctk.CTkButton(form, text="Add Shift", width=95, command=self._add_meal_shift).pack(side="right", padx=6, pady=10)
 
         cols = ("ID", "Shift Name", "Start Time", "End Time")
-        self.shifts_tree = ttk.Treeview(tab, columns=cols, show="headings", selectmode="browse")
+        shifts_tbl_wrap = ctk.CTkFrame(tab, fg_color="transparent")
+        shifts_tbl_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        shifts_tbl_wrap.grid_columnconfigure(0, weight=1)
+        shifts_tbl_wrap.grid_rowconfigure(0, weight=1)
+        self.shifts_tree = ttk.Treeview(shifts_tbl_wrap, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             self.shifts_tree.heading(c, text=c)
-        self.shifts_tree.grid(row=1, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        shifts_vsb = ttk.Scrollbar(shifts_tbl_wrap, orient="vertical", command=self.shifts_tree.yview)
+        self.shifts_tree.configure(yscrollcommand=shifts_vsb.set)
+        self.shifts_tree.grid(row=0, column=0, sticky="nsew")
+        shifts_vsb.grid(row=0, column=1, sticky="ns")
         self.shifts_tree.bind("<<TreeviewSelect>>", self._on_shift_tree_select)
 
     def _on_shift_tree_select(self, _event=None):
@@ -2135,7 +2176,7 @@ class GastroAnalyticsApp(ctk.CTk):
                     "brand_id": r['id']
                 }
                 dup_labels.append(label)
-                
+
             for r in conn.execute("SELECT id, csv_venue_name, platform, brand_id FROM platform_aliases ORDER BY csv_venue_name"):
                 alias_label = f"{r['csv_venue_name']} [{r['platform']}]"
                 if alias_label not in self.duplicate_choice_map:
@@ -2178,6 +2219,51 @@ class GastroAnalyticsApp(ctk.CTk):
             kw_rows = conn.execute("SELECT keyword FROM exclusion_keywords ORDER BY keyword").fetchall()
             self.excl_textbox.delete("1.0", "end")
             self.excl_textbox.insert("1.0", ", ".join([r['keyword'] for r in kw_rows]))
+
+        if hasattr(self, "unmapped_tree"):
+            snap = brand_service.get_brand_management_snapshot()
+            if hasattr(self, "auto_create_brand_var"):
+                self.auto_create_brand_var.set(bool(snap.get("auto_create_unknown_brands", True)))
+
+            self.unmapped_tree.delete(*self.unmapped_tree.get_children())
+            for cand in snap.get("unmapped_candidates", []):
+                d_range = f"{cand.get('date_min') or '?'}..{cand.get('date_max') or '?'}"
+                self.unmapped_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        cand.get("raw_name", ""),
+                        cand.get("platform", ""),
+                        cand.get("orders_count", 0),
+                        f"{float(cand.get('orders_sales', 0.0)):.2f}",
+                        cand.get("reports_count", 0),
+                        f"{float(cand.get('reports_gross_sales', 0.0)):.2f}",
+                        cand.get("status", "pending"),
+                    ),
+                )
+
+            self.alias_brand_id_map = {}
+            brand_choices = []
+            for b in snap.get("brands", []):
+                b_label = f"{b['name']} ({b['location_name']})"
+                self.alias_brand_id_map[b_label] = int(b["id"])
+                brand_choices.append(b_label)
+            if hasattr(self, "alias_target_brand_cb"):
+                self.alias_target_brand_cb.configure(values=brand_choices if brand_choices else [""])
+                if brand_choices and self.alias_target_brand_cb.get() not in brand_choices:
+                    self.alias_target_brand_cb.set(brand_choices[0])
+
+            self.active_alias_id_map = {}
+            alias_choices = []
+            for a in snap.get("aliases", []):
+                plat_part = f" [{a['platform']}]" if a.get("platform") else ""
+                a_label = f"#{a['id']}: {a['alias_name']}{plat_part} -> {a['brand_name']}"
+                self.active_alias_id_map[a_label] = int(a["id"])
+                alias_choices.append(a_label)
+            if hasattr(self, "active_alias_cb"):
+                self.active_alias_cb.configure(values=alias_choices if alias_choices else [""])
+                if alias_choices and self.active_alias_cb.get() not in alias_choices:
+                    self.active_alias_cb.set(alias_choices[0])
 
     def _populate_global_dropdowns(self):
         with contextlib.closing(get_connection()) as conn:
@@ -2232,8 +2318,13 @@ class GastroAnalyticsApp(ctk.CTk):
     def _on_dash_location_change(self, loc_name: str):
         brands = self._get_brands_for_location(loc_name)
         all_label = "All Active Restaurants" if loc_name == "All Locations (All Active)" else "All Brands Combined"
-        self.dash_brand_cb.configure(values=[all_label] + [b['display_name'] for b in brands])
-        self.dash_brand_cb.set(all_label)
+        prev_brand = self.dash_brand_cb.get()
+        vals = [all_label] + [b['display_name'] for b in brands]
+        self.dash_brand_cb.configure(values=vals)
+        if prev_brand in vals:
+            self.dash_brand_cb.set(prev_brand)
+        elif vals:
+            self.dash_brand_cb.set(vals[0])
 
     def _on_cal_location_change(self, loc_name: str):
         brands = self._get_brands_for_location(loc_name)

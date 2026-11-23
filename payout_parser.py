@@ -548,6 +548,22 @@ def _dedup_doc_cost_items(items: list) -> list:
         unique.append(it)
     return unique
 
+def _parse_wolt_sales_row_nums(line_str: str) -> list[float]:
+    if "|" in line_str:
+        parts = [pt.strip() for pt in line_str.split("|")]
+        tail = " ".join(parts[1:])
+    else:
+        m_lead = re.match(r"^(?:Total,?\s*)?[A-Za-z0-9 &/(),+\-éë]+?(?=\s+-?\d|\s+\d)", line_str.strip())
+        tail = line_str.strip()[m_lead.end():] if m_lead else line_str.strip()
+    no_pct = re.sub(r"-?\d+(?:[.,]\d+)?\s*%", " ", tail)
+    out: list[float] = []
+    for tok in re.findall(r"\(?-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d{3})*(?:,\d+)?|-?\d+(?:[.,]\d+)?\)?", no_pct):
+        v = parse_money(tok)
+        if v is not None and abs(v) <= 1_000_000.0:
+            out.append(v)
+    return out
+
+
 def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
     """
     Parses Wolt PDF documents (gross / VAT-inclusive amounts as primary):
@@ -621,13 +637,6 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
 
     if is_invoice:
         doc_type = "invoice"
-    for line in text.splitlines():
-        s_line = line.strip()
-        if any(k in s_line.lower() for k in ("total goods sold", "gross sales", "total sales", "sales total")):
-            nums = [
-                n for pt in s_line.split("|")
-                if "%" not in pt and (n := parse_money(pt)) is not None
-            ]
         for line in text.splitlines():
             s_line = line.strip()
             low_l = s_line.lower()
@@ -679,40 +688,69 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
                         )
 
             elif s_low.startswith("ad campaign"):
-                lbl, nums = _parse_row_values(s_ln)
-                if nums:
-                    gross_v = round(abs(nums[-1]), 2)
-                    net_v = round(abs(nums[0]), 2) if len(nums) >= 2 else None
-                    vat_v = round(abs(nums[-2]), 2) if len(nums) >= 3 else None
+                ad_nums = []
+                raw_txt = line if "\n" in line else text
+                s_lines = raw_txt.splitlines()
+                start_pos = next((i for i, l in enumerate(s_lines) if "ad campaign" in l.lower()), -1)
+                if start_pos != -1:
+                    for look_ahead in range(start_pos, min(len(s_lines), start_pos + 10)):
+                        cand = s_lines[look_ahead].strip()
+                        cand_low = cand.lower()
+                        if look_ahead > start_pos and any(
+                            cand_low.startswith(k) for k in ("vat %", "invoice amount", "bill to", "wolt commission", "finance and transaction")
+                        ):
+                            break
+                        nums_found = [
+                            float(m.replace(",", "").replace(" ", ""))
+                            for m in re.findall(r"\d[\d,\s]*\.\d{2}", cand)
+                        ]
+                        if len(nums_found) >= 2 and (cand_low.startswith("total") or re.match(r"^\d+\s+\d", cand)):
+                            ad_nums = nums_found
+                            if cand_low.startswith("total"):
+                                break
+                if ad_nums:
+                    gross_v = round(abs(ad_nums[-1]), 2)
+                    net_v = round(abs(ad_nums[0]), 2) if len(ad_nums) >= 2 else None
+                    vat_v = round(abs(ad_nums[-2]), 2) if len(ad_nums) >= 3 else None
                     if gross_v > 0:
                         cost_items.append(
                             ParsedCostItem(
                                 cost_category="ads_and_campaigns",
-                                raw_label=lbl,
+                                raw_label="Ad campaign",
                                 amount_gross=gross_v,
                                 amount_net=net_v,
                                 vat_amount=vat_v,
                             )
                         )
     else:
+        fallback_gross = None
+        fallback_net = None
         for line in text.splitlines():
             s_line = line.strip()
-            if re.search(r"(?:Total\s+goods\s+sold|Gross\s+sales|Total\s+sales|Sales\s+total)", s_line, flags=re.IGNORECASE):
-                parts = [pt.strip() for pt in s_line.split("|") if pt.strip()] if "|" in s_line else [s_line]
-                tail = " ".join(parts[1:]) if len(parts) > 1 else s_line
-                no_pct = re.sub(r"-?\d+(?:[.,]\d+)?\s*%", " ", tail)
-                nums = [
-                    abs(n) for m_n in re.finditer(r"-?\d[\d\s.,]*", no_pct)
-                    if (n := parse_money(m_n.group(0))) is not None
-                ]
-                if len(nums) >= 2:
-                    net_sales = round(min(nums[0], nums[-1]), 2)
-                    gross_sales = round(max(nums[0], nums[-1]), 2)
-                    vat_sales = round(gross_sales - net_sales, 2)
-                elif len(nums) == 1:
-                    gross_sales = round(nums[0], 2)
-                if gross_sales > 0:
-                    break
+            low_l = s_line.lower()
+            if not re.search(r"(?:total\s+goods\s+sold|gross\s+sales|total\s+sales|sales\s+total)", low_l):
+                continue
+            nums = _parse_wolt_sales_row_nums(s_line)
+            if not nums:
+                continue
+            g_cand = round(abs(nums[-1]), 2)
+            n_cand = round(abs(nums[0]), 2) if len(nums) >= 2 else None
+            if re.match(r"^total\s+goods\s+sold\b", low_l) and "wolt delivery" not in low_l and "daily" not in low_l:
+                gross_sales = g_cand
+                if n_cand is not None:
+                    net_sales = n_cand
+                    if vat_sales is None:
+                        vat_sales = round(max(0.0, gross_sales - net_sales), 2)
+                break
+            if fallback_gross is None and "wolt delivery" not in low_l and "daily" not in low_l:
+                fallback_gross = g_cand
+                fallback_net = n_cand
+        if gross_sales == 0.0 and fallback_gross is not None:
+            gross_sales = fallback_gross
+            if net_sales is None and fallback_net is not None:
+                net_sales = fallback_net
+            if net_sales is not None and vat_sales is None:
+                vat_sales = round(max(0.0, gross_sales - net_sales), 2)
 
         for m in re.finditer(
             r"(Total,?\s*(?:goods|items)\s+discounted\s+by\s+merchant)\s*\|?\s*(-?[0-9.,]+)\s*\|?\s*[0-9.,]+%\s*\|?\s*(-?[0-9.,]+)\s*\|?\s*(-?[0-9.,]+)",
@@ -771,6 +809,19 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
             p_val = parse_money(m_payout.group(1))
             if p_val is not None:
                 payout_amount = round(p_val, 2)
+
+    if gross_sales == 0.0:
+        for _ln in text.splitlines():
+            _s = _ln.strip()
+            _low = _s.lower()
+            if _low.startswith("total goods sold") and "wolt delivery" not in _low and "daily" not in _low:
+                _nums = _parse_wolt_sales_row_nums(_s)
+                if _nums:
+                    gross_sales = round(abs(_nums[-1]), 2)
+                    if len(_nums) >= 2:
+                        net_sales = round(abs(_nums[0]), 2)
+                        vat_sales = round(max(0.0, gross_sales - net_sales), 2)
+                    break
 
     report = ParsedPayoutReport(
         platform="Wolt",

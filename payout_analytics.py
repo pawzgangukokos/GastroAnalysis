@@ -213,12 +213,11 @@ def get_payout_breakdown_by_brand_and_platform(
         )
 
     if not df.empty:
-        df["cost_share_pct"] = df.apply(
-            lambda x: round((x["total_costs_gross"] / x["gross_sales_total"]) * 100.0, 2)
-            if x["gross_sales_total"] > 0
-            else 0.0,
-            axis=1,
-        )
+        def _row_share(x):
+            base_sales = float(x["gross_sales_total"] or 0.0)
+            return round((float(x["total_costs_gross"] or 0.0) / base_sales) * 100.0, 2) if base_sales > 0 else 0.0
+
+        df["cost_share_pct"] = df.apply(_row_share, axis=1)
     return df
 
 
@@ -341,26 +340,94 @@ def assign_report_brand(report_id: int, brand_id: int, register_alias: bool = Tr
         conn.commit()
 
 
+
+def _get_orders_sales_fallback(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> float:
+    clauses = [
+        "LOWER(TRIM(COALESCE(o.status, ''))) NOT IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone')"
+    ]
+    params: list = []
+    if date_from:
+        clauses.append("date(o.order_datetime) >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date(o.order_datetime) <= ?")
+        params.append(date_to)
+    if brand_id is not None:
+        clauses.append("o.brand_id = ?")
+        params.append(int(brand_id))
+    if platform and platform.strip().lower() not in {"", "all"}:
+        clauses.append("LOWER(o.platform) = LOWER(?)")
+        params.append(platform.strip())
+
+    where_sql = " WHERE " + " AND ".join(clauses)
+    with closing(get_connection()) as conn:
+        row = conn.execute(
+            f"SELECT COALESCE(SUM(o.total_sales), 0.0) AS ord_sales FROM orders o {where_sql}",
+            params,
+        ).fetchone()
+    return round(float(row["ord_sales"] or 0.0), 2) if row else 0.0
+
+
+
+def _orders_sales_for_scope(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    platform: Optional[str] = None,
+) -> float:
+    clauses = [
+        "LOWER(TRIM(COALESCE(o.status, ''))) NOT IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone')"
+    ]
+    params: list = []
+    if date_from:
+        clauses.append("date(o.order_datetime) >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date(o.order_datetime) <= ?")
+        params.append(date_to)
+    if brand_id is not None:
+        clauses.append("o.brand_id = ?")
+        params.append(int(brand_id))
+    if platform and platform.strip().lower() not in {"", "all"}:
+        clauses.append("LOWER(o.platform) = LOWER(?)")
+        params.append(platform.strip())
+
+    where_sql = " WHERE " + " AND ".join(clauses)
+    with closing(get_connection()) as conn:
+        row = conn.execute(
+            f"SELECT COALESCE(SUM(o.total_sales), 0.0) AS s FROM orders o {where_sql}",
+            params,
+        ).fetchone()
+    return round(float(row["s"] or 0.0), 2) if row else 0.0
+
+
 def get_loss_summary(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     brand_id: Optional[int] = None,
     platform: Optional[str] = None,
 ) -> dict:
-    """
-    General loss & cost summary focused on ads, service fees/commissions,
-    and overall cost burden against gross sales.
-    """
     ov = get_payout_overview(
         date_from=date_from,
         date_to=date_to,
         brand_id=brand_id,
         platform=platform,
     )
-    gross_sales = ov["gross_sales_total"]
-    ads = ov["ads_campaigns_gross"]
-    service_and_comm = ov["commissions_fees_gross"]
-    total_losses = ov["total_costs_gross"]
+    ord_sales = _orders_sales_for_scope(
+        date_from=date_from,
+        date_to=date_to,
+        brand_id=brand_id,
+        platform=platform,
+    )
+    gross_sales = max(float(ov["gross_sales_total"] or 0.0), float(ord_sales or 0.0))
+    ads = float(ov["ads_campaigns_gross"] or 0.0)
+    service_and_comm = float(ov["commissions_fees_gross"] or 0.0)
+    total_losses = float(ov["total_costs_gross"] or 0.0)
     other_losses = round(max(0.0, total_losses - ads - service_and_comm), 2)
 
     def pct(val: float) -> float:
@@ -368,14 +435,14 @@ def get_loss_summary(
 
     return {
         "reports_count": ov["reports_count"],
-        "gross_sales_total": gross_sales,
-        "ads_loss_gross": ads,
+        "gross_sales_total": round(gross_sales, 2),
+        "ads_loss_gross": round(ads, 2),
         "ads_loss_pct": pct(ads),
-        "service_fees_loss_gross": service_and_comm,
+        "service_fees_loss_gross": round(service_and_comm, 2),
         "service_fees_loss_pct": pct(service_and_comm),
         "other_losses_gross": other_losses,
         "other_losses_pct": pct(other_losses),
-        "total_losses_gross": total_losses,
+        "total_losses_gross": round(total_losses, 2),
         "total_loss_pct": pct(total_losses),
-        "payout_amount_gross": ov["payout_amount_gross"],
+        "payout_amount_gross": round(float(ov["payout_amount_gross"] or 0.0), 2),
     }

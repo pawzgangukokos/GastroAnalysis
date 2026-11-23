@@ -480,7 +480,7 @@ def parse_bolt_food_pdf_text(text: str, filename: str = "") -> ParsedPayoutRepor
         currency=currency,
         gross_sales_report=gross_sales,
         payout_amount_gross=payout_amount,
-        cost_items=cost_items,
+        cost_items=_dedup_doc_cost_items(cost_items),
         parse_status="partial" if warnings else "ok",
         parse_warnings=warnings,
         cash_received_info=cash_received,
@@ -529,6 +529,24 @@ def _extract_wolt_restaurant_and_period(text: str, filename: str) -> Tuple[str, 
 
     return restaurant_name, period_start, period_end, doc_num
 
+
+
+def _dedup_doc_cost_items(items: list) -> list:
+    """Removes repeated identical cost rows extracted multiple times from the same document/pages."""
+    seen = set()
+    unique = []
+    for it in items:
+        cat = getattr(it, "cost_category", None) if not isinstance(it, dict) else it.get("cost_category")
+        lbl = (getattr(it, "raw_label", None) if not isinstance(it, dict) else it.get("raw_label") or "").strip().lower()
+        ag = round(float((getattr(it, "amount_gross", None) if not isinstance(it, dict) else it.get("amount_gross")) or 0.0), 2)
+        an_val = getattr(it, "amount_net", None) if not isinstance(it, dict) else it.get("amount_net")
+        an = round(float(an_val), 2) if an_val is not None else None
+        key = (cat, lbl, ag, an)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(it)
+    return unique
 
 def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
     """
@@ -580,6 +598,8 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
             f"Skipping Wolt document ('{filename}'): expected payout report or merchant invoice."
         )
 
+    doc_type = "invoice" if is_invoice else "payout_statement"
+
     def _parse_row_values(line_str: str) -> tuple[str, list[float]]:
         if "|" in line_str:
             lbl_raw, tail_raw = line_str.split("|", 1)
@@ -601,6 +621,29 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
 
     if is_invoice:
         doc_type = "invoice"
+    for line in text.splitlines():
+        s_line = line.strip()
+        if any(k in s_line.lower() for k in ("total goods sold", "gross sales", "total sales", "sales total")):
+            nums = [
+                n for pt in s_line.split("|")
+                if "%" not in pt and (n := parse_money(pt)) is not None
+            ]
+        for line in text.splitlines():
+            s_line = line.strip()
+            low_l = s_line.lower()
+            if re.match(r"^total\s+goods\s+sold\b", low_l) and "wolt delivery" not in low_l and "daily" not in low_l:
+                parts = [pt.strip() for pt in s_line.split("|")]
+                nums = [
+                    n for pt in parts[1:]
+                    if "%" not in pt and (n := parse_money(pt)) is not None
+                ]
+                if nums:
+                    gross_sales = round(abs(nums[-1]), 2)
+                    if len(nums) >= 2:
+                        net_sales = round(abs(nums[0]), 2)
+                        if vat_sales is None:
+                            vat_sales = round(gross_sales - net_sales, 2)
+                    break
         if doc_num is None:
             m_inv_no = re.search(
                 r"Invoice\s+number\s*\|?\s*([A-Z0-9/\- ]+?)(?:\n|\r|$)",
@@ -652,22 +695,24 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
                             )
                         )
     else:
-        doc_type = "payout_statement"
         for line in text.splitlines():
             s_line = line.strip()
-            if re.match(r"^Total\s+goods\s+sold(?:\s*\||\s*$)", s_line, flags=re.IGNORECASE):
-                parts = [pt.strip() for pt in s_line.split("|") if pt.strip()]
+            if re.search(r"(?:Total\s+goods\s+sold|Gross\s+sales|Total\s+sales|Sales\s+total)", s_line, flags=re.IGNORECASE):
+                parts = [pt.strip() for pt in s_line.split("|") if pt.strip()] if "|" in s_line else [s_line]
+                tail = " ".join(parts[1:]) if len(parts) > 1 else s_line
+                no_pct = re.sub(r"-?\d+(?:[.,]\d+)?\s*%", " ", tail)
                 nums = [
-                    n for pt in parts[1:]
-                    if "%" not in pt and (n := parse_money(pt)) is not None
+                    abs(n) for m_n in re.finditer(r"-?\d[\d\s.,]*", no_pct)
+                    if (n := parse_money(m_n.group(0))) is not None
                 ]
                 if len(nums) >= 2:
-                    net_sales = round(nums[0], 2)
-                    gross_sales = round(nums[-1], 2)
+                    net_sales = round(min(nums[0], nums[-1]), 2)
+                    gross_sales = round(max(nums[0], nums[-1]), 2)
                     vat_sales = round(gross_sales - net_sales, 2)
                 elif len(nums) == 1:
                     gross_sales = round(nums[0], 2)
-                break
+                if gross_sales > 0:
+                    break
 
         for m in re.finditer(
             r"(Total,?\s*(?:goods|items)\s+discounted\s+by\s+merchant)\s*\|?\s*(-?[0-9.,]+)\s*\|?\s*[0-9.,]+%\s*\|?\s*(-?[0-9.,]+)\s*\|?\s*(-?[0-9.,]+)",
@@ -739,7 +784,7 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
         gross_sales_net_of_vat=net_sales,
         vat_amount=vat_sales,
         payout_amount_gross=payout_amount,
-        cost_items=cost_items,
+        cost_items=_dedup_doc_cost_items(cost_items),
         parse_status="partial" if warnings else "ok",
         parse_warnings=warnings,
     )
@@ -893,7 +938,7 @@ def parse_csv_payout_report(df: pd.DataFrame, filepath: str) -> ParsedPayoutRepo
         gross_sales_net_of_vat=round(net_sales, 2) if net_sales is not None else None,
         vat_amount=round(vat_sales, 2) if vat_sales is not None else None,
         payout_amount_gross=round(payout_amt, 2) if payout_amt is not None else None,
-        cost_items=cost_items,
+        cost_items=_dedup_doc_cost_items(cost_items),
         parse_status="ok",
     )
     report.recompute_totals()

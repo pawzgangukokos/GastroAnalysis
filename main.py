@@ -1328,17 +1328,8 @@ class GastroAnalyticsApp(ctk.CTk):
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(2, weight=1)
 
-        imp_card = ctk.CTkFrame(parent, fg_color=t["card"])
-        imp_card.grid(row=1, column=0, sticky="ew", pady=(0, 16))
-        
-        ctk.CTkButton(imp_card, text="Import CSV", command=self._one_click_import).pack(side="left", padx=16, pady=16)
-        ctk.CTkButton(imp_card, text="Custom Column Mapper", command=lambda: self._open_custom_mapper(None), fg_color="transparent", text_color=t["text"]).pack(side="left")
-        
-        self.import_log_box = ctk.CTkTextbox(imp_card, height=84, state="disabled")
-        self.import_log_box.pack(side="right", fill="both", expand=True, padx=16, pady=16)
-
         cal_card = ctk.CTkFrame(parent, fg_color=t["card"])
-        cal_card.grid(row=2, column=0, sticky="nsew")
+        cal_card.grid(row=1, column=0, rowspan=2, sticky="nsew")
         cal_card.grid_columnconfigure(0, weight=1)
         cal_card.grid_rowconfigure(2, weight=1)
         
@@ -1473,14 +1464,93 @@ class GastroAnalyticsApp(ctk.CTk):
         parent.grid_rowconfigure(0, weight=1)
         self.set_tabs = ctk.CTkTabview(parent, fg_color=t["card"])
         self.set_tabs.grid(row=0, column=0, sticky="nsew")
-        for tab_name in ["Restaurants & Brands", "Staffing Rules", "Meal Shifts", "Exclusions"]:
+        for tab_name in ["Import", "Restaurants & Brands", "Staffing Rules", "Meal Shifts", "Exclusions"]:
             self.set_tabs.add(tab_name)
         
+        self._build_settings_import_subtab(self.set_tabs.tab("Import"))
         self._build_settings_entities_subtab(self.set_tabs.tab("Restaurants & Brands"))
         self._build_settings_hr_subtab(self.set_tabs.tab("Staffing Rules"))
         self._build_settings_shifts_subtab(self.set_tabs.tab("Meal Shifts"))
         self._build_settings_exclusions_subtab(self.set_tabs.tab("Exclusions"))
         
+
+    def _build_settings_import_subtab(self, tab):
+        t = self._t()
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        top_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
+        top_card.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+
+        ctk.CTkLabel(
+            top_card,
+            text="All-in-One Folder Import (Orders CSV/XLSX + Payouts/Invoices PDF/CSV):",
+            font=self.font_bold,
+            text_color=t["text"],
+        ).pack(side="left", padx=(12, 10), pady=12)
+
+        ctk.CTkButton(
+            top_card,
+            text="Import Folder",
+            width=150,
+            command=self._import_all_from_folder,
+        ).pack(side="left", padx=6, pady=12)
+
+        ctk.CTkButton(
+            top_card,
+            text="Custom Column Mapper",
+            width=165,
+            fg_color="transparent",
+            border_width=1,
+            border_color=t["ghost_border"],
+            text_color=t["text"],
+            command=lambda: self._open_custom_mapper(None),
+        ).pack(side="left", padx=6, pady=12)
+
+        self.import_log_box = ctk.CTkTextbox(tab, state="disabled")
+        self.import_log_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(6, 12))
+
+    @safe_action
+    def _import_all_from_folder(self):
+        folder = filedialog.askdirectory(title="Select folder containing orders and payout/invoice files")
+        if not folder:
+            return
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            res = import_day_folder_recursive(folder)
+        finally:
+            self.configure(cursor="")
+
+        p_res = res.get("payouts", {}) if isinstance(res, dict) else {}
+        o_res = res.get("orders", {}) if isinstance(res, dict) else {}
+        p_imp = int(p_res.get("imported", 0) or 0)
+        p_dup = int(p_res.get("skipped_duplicates", p_res.get("duplicates", 0)) or 0)
+        p_err = len(p_res.get("errors", []) or [])
+        o_imp = int(o_res.get("imported", 0) or 0)
+        o_dup = int(o_res.get("duplicates", 0) or 0)
+        o_err = len(o_res.get("errors", []) or [])
+
+        log_line = (
+            f"[{os.path.basename(folder)}] Orders: +{o_imp} ({o_dup} dup, {o_err} err) | "
+            f"Payouts/Invoices: +{p_imp} ({p_dup} dup, {p_err} err)"
+        )
+        if hasattr(self, "import_log_box"):
+            self._append_import_log(log_line)
+
+        self.invalidate_analytics_cache()
+        self.mark_tabs_dirty()
+        self._populate_global_dropdowns()
+        self.refresh_calendar_table()
+        self.refresh_finances_tab(force=True)
+
+        messagebox.showinfo(
+            "Folder Import Complete",
+            f"Folder: {res.get('folder', folder)}\n"
+            f"Orders imported: {o_imp} (duplicates: {o_dup}, errors: {o_err})\n"
+            f"Payouts/Invoices imported: {p_imp} (duplicates: {p_dup}, errors: {p_err})",
+        )
+
     def _build_settings_entities_subtab(self, tab):
         t = self._t()
         tab.grid_columnconfigure(0, weight=1)
@@ -2202,18 +2272,7 @@ class GastroAnalyticsApp(ctk.CTk):
         ctk.CTkButton(top_bar, text="Apply", width=80, command=self.refresh_finances_tab).pack(
             side="left", padx=(0, 8), pady=8
         )
-        ctk.CTkButton(
-            top_bar,
-            text="Import Payouts Folder",
-            width=165,
-            command=self._import_payout_folder_recursive,
-        ).pack(side="right", padx=10, pady=8)
-        ctk.CTkButton(
-            top_bar,
-            text="Import Day Folder",
-            width=155,
-            command=self._import_day_folder_all,
-        ).pack(side="right", padx=(10, 0), pady=8)
+
 
         cards_frame = ctk.CTkFrame(parent)
         cards_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))

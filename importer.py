@@ -25,6 +25,116 @@ class UnrecognizedCSVFormatError(Exception):
         super().__init__(f"Unrecognized CSV format in {os.path.basename(filepath)}")
 
 
+def resolve_brand_and_location(
+    cur,
+    raw_name: str,
+    platform: str,
+    auto_create: bool = True,
+) -> Tuple[Optional[int], Optional[int], bool, Optional[str]]:
+    """
+    Unified brand/location resolver used by BOTH orders and payout importers.
+    Returns (location_id, brand_id, created_new, notice_message).
+    """
+    clean_name = (raw_name or "").strip()
+    if not clean_name:
+        return None, None, False, "Missing restaurant name; imported with brand_id=NULL."
+
+    norm = normalize_brand_alias(clean_name)
+
+    # 1. Normalized alias lookup in brand_aliases
+    if norm:
+        row = cur.execute(
+            """
+            SELECT ba.brand_id, b.location_id
+            FROM brand_aliases ba
+            JOIN brands b ON b.id = ba.brand_id
+            WHERE ba.normalized_alias = ?
+            LIMIT 1
+            """,
+            (norm,),
+        ).fetchone()
+        if row:
+            return int(row["location_id"]), int(row["brand_id"]), False, None
+
+    # 2. Exact or normalized lookup in brands
+    brands = cur.execute("SELECT id, location_id, name FROM brands").fetchall()
+    for b in brands:
+        b_name = (b["name"] or "").strip()
+        if b_name.lower() == clean_name.lower() or (norm and normalize_brand_alias(b_name) == norm):
+            brand_id = int(b["id"])
+            loc_id = int(b["location_id"])
+            if norm:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (brand_id, platform, clean_name, norm),
+                )
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (clean_name, platform, loc_id, brand_id),
+            )
+            return loc_id, brand_id, False, None
+
+    # 3. Legacy platform_aliases lookup
+    p_aliases = cur.execute(
+        "SELECT csv_venue_name, location_id, brand_id FROM platform_aliases"
+    ).fetchall()
+    for pa in p_aliases:
+        pa_name = (pa["csv_venue_name"] or "").strip()
+        if pa_name.lower() == clean_name.lower() or (norm and normalize_brand_alias(pa_name) == norm):
+            brand_id = int(pa["brand_id"])
+            loc_id = int(pa["location_id"])
+            if norm:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (brand_id, platform, clean_name, norm),
+                )
+            return loc_id, brand_id, False, None
+
+    if not auto_create:
+        return None, None, False, f"Unmapped restaurant '{clean_name}' (brand_id=NULL)."
+
+    # 4. Create brand under default location and register both aliases
+    loc = cur.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()
+    if loc:
+        loc_id = int(loc["id"])
+    else:
+        cur.execute("INSERT INTO locations (name) VALUES (?)", ("Main Kitchen",))
+        loc_id = int(cur.lastrowid)
+
+    cur.execute(
+        "INSERT INTO brands (location_id, name, status) VALUES (?, ?, 'Active')",
+        (loc_id, clean_name),
+    )
+    brand_id = int(cur.lastrowid)
+
+    if norm:
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
+            VALUES (?, ?, ?, ?)
+            """,
+            (brand_id, platform, clean_name, norm),
+        )
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        (clean_name, platform, loc_id, brand_id),
+    )
+
+    return loc_id, brand_id, True, f"Registered new brand '{clean_name}' (brand_id={brand_id})."
+
+
 class CSVImporter:
     def __init__(self):
         self.exclusions = self._load_exclusions()
@@ -35,25 +145,34 @@ class CSVImporter:
             cursor = conn.cursor()
             cursor.execute("SELECT keyword FROM exclusion_keywords")
             return [
-                str(row['keyword']).strip().lower()
+                str(row["keyword"]).strip().lower()
                 for row in cursor.fetchall()
-                if row['keyword'] and str(row['keyword']).strip()
+                if row["keyword"] and str(row["keyword"]).strip()
             ]
 
     def _load_aliases(self) -> Dict[str, dict]:
         with closing(get_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT csv_venue_name, location_id, brand_id, platform FROM platform_aliases")
-            return {row['csv_venue_name']: dict(row) for row in cursor.fetchall()}
+            return {row["csv_venue_name"]: dict(row) for row in cursor.fetchall()}
+
+    @staticmethod
+    def sniff_table(filepath: str) -> pd.DataFrame:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in {".xlsx", ".xls"}:
+            df = pd.read_excel(filepath, dtype=str)
+            df.columns = [str(c).strip() for c in df.columns]
+            return df
+        return CSVImporter.sniff_csv(filepath)
 
     @staticmethod
     def sniff_csv(filepath: str) -> pd.DataFrame:
         raw_head = Path(filepath).read_bytes()[:4]
         if raw_head.startswith((b"\xff\xfe", b"\xfe\xff")):
-            encodings = ['utf-16', 'utf-8-sig', 'utf-8', 'cp1250', 'latin1']
+            encodings = ["utf-16", "utf-8-sig", "utf-8", "cp1250", "latin1"]
         else:
-            encodings = ['utf-8-sig', 'utf-8', 'cp1250', 'utf-16', 'latin1']
-        delimiters = [',', ';', '\t']
+            encodings = ["utf-8-sig", "utf-8", "cp1250", "utf-16", "latin1"]
+        delimiters = [",", ";", "\t"]
 
         for enc in encodings:
             for sep in delimiters:
@@ -116,63 +235,32 @@ class CSVImporter:
             cursor = conn.cursor()
             rows = cursor.execute("SELECT template_name, mapping_json FROM csv_templates").fetchall()
             for row in rows:
-                saved_map = json.loads(row['mapping_json'])
+                saved_map = json.loads(row["mapping_json"])
                 mapped_csv_cols = set(saved_map.keys())
                 if mapped_csv_cols and mapped_csv_cols.issubset(col_set):
-                    return row['template_name'], saved_map
+                    return row["template_name"], saved_map
 
         return None
 
     def _resolve_or_create_venue(self, venue_raw: str, platform_name: str) -> Tuple[int, int]:
         if venue_raw in self.aliases:
             entry = self.aliases[venue_raw]
-            return entry['location_id'], entry['brand_id']
+            return int(entry["location_id"]), int(entry["brand_id"])
 
         with closing(get_connection()) as conn:
             cur = conn.cursor()
-            existing_brand = cur.execute(
-                "SELECT id, location_id FROM brands WHERE LOWER(name) = LOWER(?)",
-                (venue_raw,)
-            ).fetchone()
-
-            if existing_brand:
-                loc_id = existing_brand['location_id']
-                brand_id = existing_brand['id']
-            else:
-                default_loc = cur.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()
-                if default_loc:
-                    loc_id = default_loc['id']
-                else:
-                    cur.execute("INSERT INTO locations (name) VALUES (?)", ("Main Kitchen",))
-                    loc_id = cur.lastrowid
-
-                cur.execute(
-                    "INSERT INTO brands (location_id, name, status) VALUES (?, ?, 'Active')",
-                    (loc_id, venue_raw)
-                )
-                brand_id = cur.lastrowid
-
-            cur.execute("""
-                INSERT OR REPLACE INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
-                VALUES (?, ?, ?, ?)
-            """, (venue_raw, platform_name, loc_id, brand_id))
-
-            norm_alias = normalize_brand_alias(venue_raw)
-            if norm_alias:
-                cur.execute("""
-                    INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
-                    VALUES (?, ?, ?, ?)
-                """, (brand_id, platform_name, venue_raw, norm_alias))
-
+            loc_id, brand_id, _, _ = resolve_brand_and_location(
+                cur, venue_raw, platform_name, auto_create=True
+            )
             conn.commit()
 
         self.aliases[venue_raw] = {
             "csv_venue_name": venue_raw,
             "platform": platform_name,
             "location_id": loc_id,
-            "brand_id": brand_id
+            "brand_id": brand_id,
         }
-        return loc_id, brand_id
+        return int(loc_id), int(brand_id)
 
     def parse_items_detailed(self, item_string: str) -> Tuple[int, List[Tuple[str, int]]]:
         if pd.isna(item_string) or not str(item_string).strip():
@@ -189,12 +277,9 @@ class CSVImporter:
         except ValueError:
             pass
 
-        # Decision: Exclusion keywords filter non-kitchen/packaging items out of
-        # sold dish aggregations (order_items / top dishes), while keeping
-        # order-level items_count consistent with ordered quantities.
         total_items = 0
         dish_totals: Dict[str, int] = {}
-        pattern = re.compile(r'(\d+)\s*[xX]\s*(.+?)(?=(?:,\s*\d+\s*[xX]\s)|$)')
+        pattern = re.compile(r"(\d+)\s*[xX]\s*(.+?)(?=(?:,\s*\d+\s*[xX]\s)|$)")
         matches = pattern.findall(cleaned)
 
         for qty_str, raw_desc in matches:
@@ -204,8 +289,13 @@ class CSVImporter:
             desc_lower = raw_desc.lower()
             if any(excl and excl in desc_lower for excl in self.exclusions):
                 continue
-            dish_name = re.sub(r'\s+\d+(?:[.,]\d+)?\s*(?:EUR|€|USD|\$|GBP|£).*$', '', raw_desc, flags=re.IGNORECASE)
-            dish_name = re.sub(r',\s*\d+\s*(?:g|kg|ml|l|pcs)\b.*$', '', dish_name, flags=re.IGNORECASE)
+            dish_name = re.sub(
+                r"\s+\d+(?:[.,]\d+)?\s*(?:EUR|€|USD|\$|GBP|£).*$",
+                "",
+                raw_desc,
+                flags=re.IGNORECASE,
+            )
+            dish_name = re.sub(r",\s*\d+\s*(?:g|kg|ml|l|pcs)\b.*$", "", dish_name, flags=re.IGNORECASE)
             dish_name = dish_name.strip(" ,-")
 
             if dish_name:
@@ -214,10 +304,10 @@ class CSVImporter:
         return total_items, list(dish_totals.items())
 
     def normalize_rating(self, rating_val) -> Optional[float]:
-        if pd.isna(rating_val) or str(rating_val).strip() == '':
+        if pd.isna(rating_val) or str(rating_val).strip() == "":
             return None
-        val_str = str(rating_val).strip().replace(',', '.')
-        match = re.search(r'(\d+(\.\d+)?)', val_str)
+        val_str = str(rating_val).strip().replace(",", ".")
+        match = re.search(r"(\d+(\.\d+)?)", val_str)
         if match:
             score = float(match.group(1))
             if 1.0 <= score <= 5.0:
@@ -228,9 +318,9 @@ class CSVImporter:
         self,
         filepath: str,
         override_mapping: Optional[Dict[str, str]] = None,
-        override_platform: Optional[str] = None
+        override_platform: Optional[str] = None,
     ) -> dict:
-        df = self.sniff_csv(filepath)
+        df = self.sniff_table(filepath)
 
         # Route payout/cost CSVs to PayoutImporter instead of orders table
         if not override_mapping and is_payout_csv(df):
@@ -261,79 +351,111 @@ class CSVImporter:
         brands_seen = set()
 
         for _, row in df.iterrows():
-            order_id = str(row.get(col_map.get('Order ID', ''), '')).strip()
-            if not order_id or order_id.lower() == 'nan':
+            order_id = str(row.get(col_map.get("Order ID", ""), "")).strip()
+            if not order_id or order_id.lower() == "nan":
                 continue
 
-            raw_date = str(row.get(col_map.get('Order Date/Time', ''), '')).strip()
-            if not raw_date or raw_date.lower() == 'nan':
+            raw_date = str(row.get(col_map.get("Order Date/Time", ""), "")).strip()
+            if not raw_date or raw_date.lower() == "nan":
                 continue
             try:
-                dt_obj = pd.to_datetime(raw_date, format='ISO8601') if raw_date[:4].isdigit() and raw_date[4:5] == '-' else pd.to_datetime(raw_date, dayfirst=True)
+                dt_obj = (
+                    pd.to_datetime(raw_date, format="ISO8601")
+                    if raw_date[:4].isdigit() and raw_date[4:5] == "-"
+                    else pd.to_datetime(raw_date, dayfirst=True)
+                )
                 if pd.isna(dt_obj):
                     continue
-                order_dt = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+                order_dt = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 continue
 
-            status_col = col_map.get('Status')
-            status = str(row.get(status_col, 'delivered')).strip().lower() if status_col else 'delivered'
+            status_col = col_map.get("Status")
+            status = str(row.get(status_col, "delivered")).strip().lower() if status_col else "delivered"
             if status in (
-                'refunded', 'void', 'canceled', 'cancelled', 'rejected',
-                'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone'
+                "refunded",
+                "void",
+                "canceled",
+                "cancelled",
+                "rejected",
+                "odrzucone",
+                "odrzucony",
+                "anulowane",
+                "anulowany",
+                "zwrocone",
             ):
-                status = 'cancelled'
+                status = "cancelled"
 
-            venue_col = col_map.get('Venue/Brand Name')
-            venue_raw = str(row.get(venue_col, '')).strip() if venue_col else ""
-            if not venue_raw or venue_raw.lower() == 'nan':
+            venue_col = col_map.get("Venue/Brand Name")
+            venue_raw = str(row.get(venue_col, "")).strip() if venue_col else ""
+            if not venue_raw or venue_raw.lower() == "nan":
                 venue_raw = os.path.splitext(os.path.basename(filepath))[0]
 
             loc_id, brand_id = self._resolve_or_create_venue(venue_raw, platform_name)
             brands_seen.add(brand_id)
 
-            sales_col = col_map.get('Sales Amount (Net)') or col_map.get('Sales Amount (Gross)') or col_map.get('Sales Amount')
+            sales_col = (
+                col_map.get("Sales Amount (Net)")
+                or col_map.get("Sales Amount (Gross)")
+                or col_map.get("Sales Amount")
+            )
             parsed_sales = parse_money(row.get(sales_col)) if sales_col else None
             total_sales = float(parsed_sales) if parsed_sales is not None else 0.0
 
             if total_sales < 0:
-                status = 'cancelled'
+                status = "cancelled"
                 total_sales = abs(total_sales)
 
-            items_raw = row.get(col_map.get('Items Count or Items Text', ''))
+            items_raw = row.get(col_map.get("Items Count or Items Text", ""))
             items_count, parsed_dishes = self.parse_items_detailed(items_raw)
-            rating = self.normalize_rating(row.get(col_map.get('Customer Rating', '')))
+            rating = self.normalize_rating(row.get(col_map.get("Customer Rating", "")))
 
-            records_to_insert.append((
-                loc_id, brand_id, platform_name, order_id, order_dt,
-                status, items_count, total_sales, rating, venue_raw
-            ))
+            records_to_insert.append(
+                (
+                    loc_id,
+                    brand_id,
+                    platform_name,
+                    order_id,
+                    order_dt,
+                    status,
+                    items_count,
+                    total_sales,
+                    rating,
+                    venue_raw,
+                )
+            )
 
-            if status != 'cancelled' and parsed_dishes:
+            if status != "cancelled" and parsed_dishes:
                 for dish_name, qty in parsed_dishes:
-                    dish_records_to_insert.append((
-                        loc_id, brand_id, platform_name, order_id, order_dt, dish_name, qty
-                    ))
+                    dish_records_to_insert.append(
+                        (loc_id, brand_id, platform_name, order_id, order_dt, dish_name, qty)
+                    )
 
         inserted = 0
         skipped = 0
         if records_to_insert:
             with closing(get_connection()) as conn:
                 cursor = conn.cursor()
-                cursor.executemany("""
+                cursor.executemany(
+                    """
                     INSERT OR IGNORE INTO orders
                     (location_id, brand_id, platform, order_id, order_datetime, status, items_count, total_sales, rating, source_venue_name)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, records_to_insert)
+                    """,
+                    records_to_insert,
+                )
                 inserted = cursor.rowcount
                 skipped = len(records_to_insert) - inserted
 
                 if dish_records_to_insert:
-                    cursor.executemany("""
+                    cursor.executemany(
+                        """
                         INSERT OR IGNORE INTO order_items
                         (location_id, brand_id, platform, order_id, order_datetime, item_name, quantity)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, dish_records_to_insert)
+                        """,
+                        dish_records_to_insert,
+                    )
                 conn.commit()
 
         return {
@@ -341,32 +463,17 @@ class CSVImporter:
             "platform": platform_name,
             "inserted": inserted,
             "skipped": skipped,
-            "brands_count": len(brands_seen)
+            "brands_count": len(brands_seen),
         }
 
 
-# =============================================================================
-# STAGE 1: PAYOUT & COST IMPORTER (RECURSIVE, TRANSACTIONAL, IDEMPOTENT)
-# =============================================================================
-
 class PayoutImporter:
-    """
-    Imports Bolt Food & Wolt payout/invoice/sales PDFs and payout CSVs into
-    `payout_reports` and `payout_cost_items` with:
-    - fast `file_sha256` deduplication prior to heavy PDF parsing,
-    - secondary `report_fingerprint` deduplication,
-    - per-file atomic transactions (rollback on single-file failure without aborting batch),
-    - automatic brand resolution/registration via `brand_aliases` and `brands`.
-    """
-
     SUPPORTED_EXTENSIONS = {".pdf", ".csv"}
 
     def __init__(self, auto_create_brands: bool = True):
         self.auto_create_brands = auto_create_brands
-        self._csv_helper = CSVImporter()
 
     def discover_files(self, paths: Iterable[Union[str, Path]]) -> List[str]:
-        """Recursively collects all supported files (.pdf, .csv) from files and directories."""
         discovered: List[str] = []
         seen_paths = set()
 
@@ -396,97 +503,12 @@ class PayoutImporter:
         raw_restaurant_name: str,
         platform: str,
     ) -> Tuple[Optional[int], bool, Optional[str]]:
-        """
-        Resolves restaurant name to `brand_id` via `brand_aliases` -> `brands` -> `platform_aliases`.
-        If not found and `auto_create_brands=True`, creates a new brand + alias and returns a notice.
-        """
-        clean_name = (raw_restaurant_name or "").strip()
-        if not clean_name:
-            return None, False, "Missing restaurant name; imported with brand_id=NULL."
-
-        norm = normalize_brand_alias(clean_name)
-
-        # 1. Check brand_aliases
-        if norm:
-            row = cur.execute(
-                "SELECT brand_id FROM brand_aliases WHERE normalized_alias = ?",
-                (norm,),
-            ).fetchone()
-            if row:
-                return int(row["brand_id"]), False, None
-
-        # 2. Check existing brands (exact case-insensitive or normalized match)
-        brands = cur.execute("SELECT id, name FROM brands").fetchall()
-        for b in brands:
-            if b["name"].strip().lower() == clean_name.lower() or (norm and normalize_brand_alias(b["name"]) == norm):
-                brand_id = int(b["id"])
-                if norm:
-                    cur.execute(
-                        """
-                        INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (brand_id, platform, clean_name, norm),
-                    )
-                return brand_id, False, None
-
-        # 3. Check legacy platform_aliases
-        p_aliases = cur.execute("SELECT csv_venue_name, brand_id FROM platform_aliases").fetchall()
-        for pa in p_aliases:
-            if pa["csv_venue_name"].strip().lower() == clean_name.lower() or (
-                norm and normalize_brand_alias(pa["csv_venue_name"]) == norm
-            ):
-                brand_id = int(pa["brand_id"])
-                if norm:
-                    cur.execute(
-                        """
-                        INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (brand_id, platform, clean_name, norm),
-                    )
-                return brand_id, False, None
-
-        if not self.auto_create_brands:
-            return None, False, f"Unmapped restaurant '{clean_name}' (brand_id=NULL)."
-
-        # 4. Create brand under default/first location & register alias
-        loc = cur.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()
-        if loc:
-            loc_id = int(loc["id"])
-        else:
-            cur.execute("INSERT INTO locations (name) VALUES (?)", ("Main Kitchen",))
-            loc_id = int(cur.lastrowid)
-
-        cur.execute(
-            "INSERT INTO brands (location_id, name, status) VALUES (?, ?, 'Active')",
-            (loc_id, clean_name),
+        _, brand_id, created, msg = resolve_brand_and_location(
+            cur, raw_restaurant_name, platform, auto_create=self.auto_create_brands
         )
-        brand_id = int(cur.lastrowid)
-
-        if norm:
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
-                VALUES (?, ?, ?, ?)
-                """,
-                (brand_id, platform, clean_name, norm),
-            )
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            (clean_name, platform, loc_id, brand_id),
-        )
-
-        return brand_id, True, f"Registered new brand '{clean_name}' (brand_id={brand_id})."
+        return brand_id, created, msg
 
     def import_files(self, paths: Iterable[Union[str, Path]], create_backup: bool = False) -> dict:
-        """
-        Recursively scans `paths` (directories and/or file paths) and imports all payout reports.
-        Returns a structured summary dictionary.
-        """
         files = self.discover_files(paths)
         summary = {
             "found": len(files),
@@ -512,7 +534,6 @@ class PayoutImporter:
             ext = os.path.splitext(fname)[1].lower()
 
             try:
-                # STEP 1: Fast SHA-256 check BEFORE heavy PDF parsing
                 file_sha256 = compute_file_sha256(filepath)
                 with closing(get_connection()) as conn:
                     dup_sha = conn.execute(
@@ -523,11 +544,10 @@ class PayoutImporter:
                     summary["skipped_duplicates"] += 1
                     continue
 
-                # STEP 2: Parse document (PDF or payout CSV)
                 if ext == ".pdf":
                     parsed: ParsedPayoutReport = parse_pdf_payout_report(filepath)
                 elif ext == ".csv":
-                    df = self._csv_helper.sniff_csv(filepath)
+                    df = CSVImporter.sniff_csv(filepath)
                     if not is_payout_csv(df):
                         summary["skipped_non_payout_csv"] += 1
                         continue
@@ -537,11 +557,9 @@ class PayoutImporter:
 
                 fingerprint = parsed.build_fingerprint()
 
-                # STEP 3: Per-file atomic transaction
                 with closing(get_connection()) as conn:
                     cur = conn.cursor()
                     try:
-                        # Check secondary fingerprint deduplication
                         dup_fp = cur.execute(
                             "SELECT id, source_file_name FROM payout_reports WHERE report_fingerprint = ?",
                             (fingerprint,),
@@ -654,7 +672,6 @@ def import_payouts_recursive(
     auto_create_brands: bool = True,
     create_backup: bool = False,
 ) -> dict:
-    """Convenience wrapper for recursive directory / multi-file payout import."""
     if isinstance(paths, (str, Path)):
         path_list = [paths]
     else:
@@ -674,10 +691,13 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
             if not target:
                 raise ValueError("Target brand no longer exists.")
 
-            target_loc_id = target['location_id']
-            cur.execute("""
+            target_loc_id = target["location_id"]
+            cur.execute(
+                """
                 UPDATE OR IGNORE orders SET brand_id = ?, location_id = ? WHERE brand_id = ?
-            """, (target_brand_id, target_loc_id, source_brand_id))
+                """,
+                (target_brand_id, target_loc_id, source_brand_id),
+            )
             moved_orders = cur.rowcount
 
             rem_orders = cur.execute(
@@ -703,11 +723,16 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
                     (source_brand_id, plat, orig_oid),
                 )
 
-            has_items_tbl = cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='order_items'").fetchone()
+            has_items_tbl = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='order_items'"
+            ).fetchone()
             if has_items_tbl:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE OR IGNORE order_items SET brand_id = ?, location_id = ? WHERE brand_id = ?
-                """, (target_brand_id, target_loc_id, source_brand_id))
+                    """,
+                    (target_brand_id, target_loc_id, source_brand_id),
+                )
                 rem_items = cur.execute(
                     "SELECT rowid, platform, order_id FROM order_items WHERE brand_id = ?",
                     (source_brand_id,),
@@ -721,11 +746,12 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
                         (target_brand_id, target_loc_id, new_oid, i_id),
                     )
 
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE platform_aliases SET brand_id = ?, location_id = ? WHERE brand_id = ?
-            """, (target_brand_id, target_loc_id, source_brand_id))
-
-            # Keep payout_reports, payout_cost_items, and brand_aliases consistent on brand merge
+                """,
+                (target_brand_id, target_loc_id, source_brand_id),
+            )
             cur.execute("UPDATE payout_reports SET brand_id = ? WHERE brand_id = ?", (target_brand_id, source_brand_id))
             cur.execute("UPDATE payout_cost_items SET brand_id = ? WHERE brand_id = ?", (target_brand_id, source_brand_id))
             cur.execute("UPDATE brand_aliases SET brand_id = ? WHERE brand_id = ?", (target_brand_id, source_brand_id))
@@ -740,101 +766,71 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
             raise
 
 
-def _dispatch_orders_file(file_path: Path) -> dict:
-    """Imports sales/orders file via CSVImporter.auto_import_file."""
-    fp = str(file_path)
-    importer_cls = globals().get("CSVImporter")
-    if importer_cls is None:
-        raise RuntimeError("Missing CSVImporter class in importer.py.")
-
-    try:
-        inst = importer_cls()
-    except TypeError:
-        # When __init__ requires a database path or db_path
-        import inspect
-        params = [
-            name for name, par in inspect.signature(importer_cls.__init__).parameters.items()
-            if name != "self" and par.default is inspect.Parameter.empty
-        ]
-        kwargs = {}
-        for name in params:
-            if "db" in name.lower():
-                for candidate in ("DB_PATH", "DATABASE_PATH", "db_path"):
-                    if candidate in globals():
-                        kwargs[name] = globals()[candidate]
-                        break
-        inst = importer_cls(**kwargs)
-
-    if hasattr(inst, "auto_import_file") and callable(inst.auto_import_file):
-        res = inst.auto_import_file(fp)
-        return res if isinstance(res, dict) else {"imported": 1, "result": res}
-
-    raise RuntimeError("CSVImporter does not implement auto_import_file.")
-
-
-
 def import_day_folder_recursive(folder_path: str) -> dict:
     """
-    Recursively scans a day folder:
-    - routes PDF and payout/invoice CSV files to import_payouts_recursive,
-    - routes remaining CSV/XLSX order files to the orders importer.
+    Recursively scans a folder once:
+    - routes PDFs and payout/invoice CSVs ONLY to PayoutImporter (passing exact file list),
+    - routes order CSV/XLSX files to CSVImporter.
     """
     root = Path(folder_path)
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"Folder does not exist: {folder_path}")
 
-    payout_files: list[str] = []
-    order_files: list[str] = []
-    other_files: list[str] = []
+    payout_files: List[str] = []
+    order_files: List[str] = []
+    other_files: List[str] = []
+
+    orders_importer = CSVImporter()
 
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
         ext = p.suffix.lower()
         name_low = p.name.lower()
+
         if ext == ".pdf":
             payout_files.append(str(p))
-        elif ext == ".csv":
+        elif ext in {".csv", ".xlsx", ".xls"}:
             try:
-                df_probe = CSVImporter.sniff_csv(str(p))
+                df_probe = CSVImporter.sniff_table(str(p))
                 if is_payout_csv(df_probe):
                     payout_files.append(str(p))
                 else:
                     order_files.append(str(p))
             except Exception:
                 if ("order" not in name_low and "orders" not in name_low) and any(
-                    k in name_low for k in ("payout", "invoice")
+                    k in name_low for k in ("payout", "invoice", "statement", "settlement")
                 ):
                     payout_files.append(str(p))
                 else:
                     order_files.append(str(p))
-        elif ext in {".xlsx", ".xls"}:
-            order_files.append(str(p))
         else:
             other_files.append(str(p))
 
-    payout_summary = {"imported": 0, "duplicates": 0, "warnings": [], "errors": []}
+    payout_summary = {
+        "found": len(payout_files),
+        "imported": 0,
+        "skipped_duplicates": 0,
+        "skipped_non_payout_csv": 0,
+        "warnings_count": 0,
+        "errors_count": 0,
+        "new_brands_created": [],
+        "warnings": [],
+        "errors": [],
+        "imported_files": [],
+    }
     if payout_files:
-        # Import selected files or an entire folder if import_payouts_recursive accepts a path
-        try:
-            payout_summary = import_payouts_recursive(str(root))
-        except Exception as exc:
-            payout_summary["errors"].append(f"Payouts: {exc}")
+        payout_summary = import_payouts_recursive(payout_files, create_backup=True)
 
     orders_imported = 0
     orders_duplicates = 0
-    orders_errors: list[str] = []
+    orders_errors: List[str] = []
 
     for ofp in order_files:
         try:
-            res = _dispatch_orders_file(Path(ofp))
-            if isinstance(res, dict):
-                orders_imported += int(res.get("imported", res.get("inserted", 1)) or 0)
-                orders_duplicates += int(res.get("duplicates", res.get("skipped", 0)) or 0)
-                for err in res.get("errors", []) or []:
-                    orders_errors.append(str(err))
-            else:
-                orders_imported += 1
+            res = orders_importer.auto_import_file(ofp)
+            orders_imported += int(res.get("inserted", 0) or 0)
+            orders_duplicates += int(res.get("skipped", 0) or 0)
         except Exception as exc:
             orders_errors.append(f"{Path(ofp).name}: {exc}")
 

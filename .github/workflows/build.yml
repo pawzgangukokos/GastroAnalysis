@@ -1,0 +1,48 @@
+name: Build GastroAnalytics
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build Windows app
+        run: pyinstaller --clean --noconfirm GastroAnalytics.spec
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GastroAnalytics-Windows-x64
+          path: dist/GastroAnalytics/
+
+  build-macos-m2:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt pyinstaller
+      - name: Build macOS M2 .app bundle
+        run: pyinstaller --clean --noconfirm GastroAnalytics.spec
+      - name: Archive .app preserving symlinks
+        run: ditto -c -k --sequesterRsrc --keepParent dist/GastroAnalytics.app GastroAnalytics-macOS-M2.zip
+      - name: Upload macOS M2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GastroAnalytics-macOS-M2-arm64
+          path: GastroAnalytics-macOS-M2.zip

@@ -141,7 +141,8 @@ def resolve_brand_and_location(
 
 
 class CSVImporter:
-    def __init__(self):
+    def __init__(self, auto_create_brands: bool = True):
+        self.auto_create_brands = auto_create_brands
         self.exclusions = self._load_exclusions()
         self.aliases = self._load_aliases()
         self._resolved_venue_cache = {}
@@ -258,10 +259,14 @@ class CSVImporter:
             self._resolved_venue_cache[key] = out
             return out
         if conn is not None:
-            loc_id, brand_id, _, _ = resolve_brand_and_location(conn.cursor(), venue_raw, platform_name, auto_create=True)
+            loc_id, brand_id, _, _ = resolve_brand_and_location(
+                conn.cursor(), venue_raw, platform_name, auto_create=self.auto_create_brands
+            )
         else:
             with closing(get_connection()) as c:
-                loc_id, brand_id, _, _ = resolve_brand_and_location(c.cursor(), venue_raw, platform_name, auto_create=True)
+                loc_id, brand_id, _, _ = resolve_brand_and_location(
+                    c.cursor(), venue_raw, platform_name, auto_create=self.auto_create_brands
+                )
                 c.commit()
         out = (int(loc_id), int(brand_id))
         self.aliases[venue_raw] = {"csv_venue_name": venue_raw, "platform": platform_name, "location_id": loc_id, "brand_id": brand_id}
@@ -783,7 +788,7 @@ def merge_brands(source_brand_id: int, target_brand_id: int) -> int:
             raise
 
 
-def import_day_folder_recursive(folder_path: str) -> dict:
+def import_day_folder_recursive(folder_path: str, auto_create_brands: bool = True) -> dict:
     """
     Recursively scans a folder once:
     - routes PDFs and payout/invoice CSVs ONLY to PayoutImporter (passing exact file list),
@@ -797,7 +802,7 @@ def import_day_folder_recursive(folder_path: str) -> dict:
     order_files: List[str] = []
     other_files: List[str] = []
 
-    orders_importer = CSVImporter()
+    orders_importer = CSVImporter(auto_create_brands=auto_create_brands)
 
     for p in sorted(root.rglob("*")):
         if not p.is_file():
@@ -837,7 +842,9 @@ def import_day_folder_recursive(folder_path: str) -> dict:
         "imported_files": [],
     }
     if payout_files:
-        payout_summary = import_payouts_recursive(payout_files, create_backup=True)
+        payout_summary = import_payouts_recursive(
+            payout_files, auto_create_brands=auto_create_brands, create_backup=True
+        )
 
     orders_imported = 0
     orders_duplicates = 0

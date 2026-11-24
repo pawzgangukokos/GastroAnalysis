@@ -1,85 +1,107 @@
+"""
+Brand / alias management service.
+ 
+IMPORTANT: this module does NOT define its own `brands`, `brand_aliases` or
+`platform_aliases` tables. Those are owned by database.py and already used
+by main.py, importer.py and payout_analytics.py with this shape:
+ 
+    brands(id, location_id, name, status)
+    brand_aliases(id, brand_id, platform, alias_name, normalized_alias)
+    platform_aliases(id, csv_venue_name UNIQUE, platform, location_id, brand_id)
+ 
+This module only owns two of its own bookkeeping tables:
+    pending_brand_aliases  -- tracks unmapped names seen during import so the
+                              "Unmapped" screen can hide ones the user deferred
+    app_settings            -- generic key/value settings (auto_create_brands)
+"""
+ 
 import json
-import re
 from typing import Any, Dict, List, Optional
-
+ 
 from database import get_connection
-
-
-def _normalize_key(name: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (name or "").strip().lower())
-    return cleaned
-
-
+from payout_parser import normalize_brand_alias
+ 
+ 
+# Table names deliberately unique to this module/version. Earlier app builds
+# shipped a `pending_brand_aliases` / `app_settings` table under their own,
+# incompatible shapes; reusing those names and relying on
+# "CREATE TABLE IF NOT EXISTS" would silently keep whatever old columns
+# already exist on a user's real database. New names sidestep that entirely.
+_PENDING_TABLE = "brand_unmapped_queue"
+_SETTINGS_TABLE = "brand_service_settings"
+ 
+_PENDING_CREATE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {_PENDING_TABLE} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        raw_name TEXT NOT NULL,
+        name_norm TEXT NOT NULL,
+        platform TEXT NOT NULL DEFAULT '',
+        source_type TEXT DEFAULT 'import',
+        occurrences INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(name_norm, platform)
+    )
+"""
+ 
+_SETTINGS_CREATE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {_SETTINGS_TABLE} (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+"""
+ 
+ 
+def _ensure_fresh_table(conn_or_cur, table_name: str, required_columns: set, create_sql: str) -> None:
+    """Creates table_name if missing. If a table with that name already
+    exists but is missing a column this module needs (leftover from a
+    different/older version of this file), it is dropped and recreated.
+    Safe here because these two tables only ever hold disposable bookkeeping
+    (an "unmapped names" queue and one checkbox setting) -- never orders,
+    brands or payout data."""
+    row = conn_or_cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+    ).fetchone()
+    if row:
+        existing_cols = {r[1] for r in conn_or_cur.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        if not required_columns.issubset(existing_cols):
+            conn_or_cur.execute(f"DROP TABLE {table_name}")
+    conn_or_cur.execute(create_sql)
+ 
+ 
 def _ensure_tables(conn) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS brands (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS brand_aliases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            brand_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_norm TEXT NOT NULL UNIQUE,
-            source TEXT DEFAULT 'manual',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (brand_id) REFERENCES brands(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS pending_brand_aliases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            raw_name TEXT NOT NULL,
-            name_norm TEXT NOT NULL UNIQUE,
-            platform TEXT DEFAULT '',
-            source_file TEXT DEFAULT '',
-            occurrences INTEGER NOT NULL DEFAULT 1,
-            status TEXT NOT NULL DEFAULT 'pending',
-            last_seen TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """
-    )
-
-
+    """Creates only the tables this module owns. Never touches brands/
+    brand_aliases/platform_aliases -- those already exist via database.py."""
+    _ensure_fresh_table(conn, _PENDING_TABLE, {"name_norm", "platform", "status"}, _PENDING_CREATE_SQL)
+    _ensure_fresh_table(conn, _SETTINGS_TABLE, {"key", "value"}, _SETTINGS_CREATE_SQL)
+ 
+ 
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+ 
 def get_auto_create_brands_setting() -> bool:
     conn = get_connection()
     try:
         _ensure_tables(conn)
         row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'auto_create_brands'"
+            f"SELECT value FROM {_SETTINGS_TABLE} WHERE key = 'auto_create_brands'"
         ).fetchone()
-        if not row:
-            return False
+        if row is None:
+            return True  # matches the UI checkbox's default (checked)
         return str(row[0]).strip().lower() in ("1", "true", "yes", "on")
     finally:
         conn.close()
-
-
+ 
+ 
 def set_auto_create_brands_setting(enabled: bool) -> bool:
     conn = get_connection()
     try:
         _ensure_tables(conn)
         val = "1" if enabled else "0"
         conn.execute(
-            """
-            INSERT INTO app_settings (key, value) VALUES ('auto_create_brands', ?)
+            f"""
+            INSERT INTO {_SETTINGS_TABLE} (key, value) VALUES ('auto_create_brands', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
             (val,),
@@ -88,274 +110,414 @@ def set_auto_create_brands_setting(enabled: bool) -> bool:
         return bool(enabled)
     finally:
         conn.close()
-
-
-def resolve_brand_name(raw_name: str, platform: str = "", source_file: str = "") -> Optional[str]:
-    if not raw_name or not str(raw_name).strip():
-        return None
-
-    clean_name = str(raw_name).strip()
-    norm = _normalize_key(clean_name)
-
-    conn = get_connection()
-    try:
-        _ensure_tables(conn)
-
-        alias_row = conn.execute(
-            """
-            SELECT b.name
-            FROM brand_aliases ba
-            JOIN brands b ON b.id = ba.brand_id
-            WHERE ba.alias_norm = ?
-            """,
-            (norm,),
-        ).fetchone()
-        if alias_row:
-            return alias_row[0]
-
-        brand_row = conn.execute(
-            "SELECT name FROM brands WHERE lower(trim(name)) = ?",
-            (norm,),
-        ).fetchone()
-        if brand_row:
-            return brand_row[0]
-
-        if get_auto_create_brands_setting():
-            conn.execute(
-                "INSERT OR IGNORE INTO brands (name, active) VALUES (?, 1)",
-                (clean_name,),
-            )
-            created = conn.execute(
-                "SELECT name FROM brands WHERE lower(trim(name)) = ?",
-                (norm,),
-            ).fetchone()
-            conn.commit()
-            return created[0] if created else clean_name
-
-        record_pending_brand_alias(
-            raw_name=clean_name,
-            platform=platform,
-            source_file=source_file,
-            _conn=conn,
-        )
-        conn.commit()
-        return None
-    finally:
-        conn.close()
-
-
+ 
+ 
+# ---------------------------------------------------------------------------
+# Pending / unmapped bookkeeping
+# ---------------------------------------------------------------------------
+ 
 def record_pending_brand_alias(
+    cur,
     raw_name: str,
     platform: str = "",
-    source_file: str = "",
-    _conn=None,
+    source_type: str = "import",
+    status: str = "pending",
 ) -> None:
-    if not raw_name or not str(raw_name).strip():
+    """Upserts a bookkeeping row for a restaurant name importer.py could not
+    resolve to a brand. Takes an EXISTING cursor so it participates in the
+    caller's transaction -- it never commits or closes the connection."""
+    clean_name = (raw_name or "").strip()
+    if not clean_name:
         return
-    clean_name = str(raw_name).strip()
-    norm = _normalize_key(clean_name)
-
-    owns_conn = _conn is None
-    conn = _conn or get_connection()
-    try:
-        _ensure_tables(conn)
-        conn.execute(
-            """
-            INSERT INTO pending_brand_aliases (raw_name, name_norm, platform, source_file, occurrences, status)
-            VALUES (?, ?, ?, ?, 1, 'pending')
-            ON CONFLICT(name_norm) DO UPDATE SET
-                occurrences = pending_brand_aliases.occurrences + 1,
-                platform = CASE WHEN excluded.platform != '' THEN excluded.platform ELSE pending_brand_aliases.platform END,
-                source_file = CASE WHEN excluded.source_file != '' THEN excluded.source_file ELSE pending_brand_aliases.source_file END,
-                status = CASE WHEN pending_brand_aliases.status = 'deferred' THEN 'deferred' ELSE 'pending' END,
-                last_seen = CURRENT_TIMESTAMP
-            """,
-            (clean_name, norm, platform or "", source_file or ""),
-        )
-        if owns_conn:
-            conn.commit()
-    finally:
-        if owns_conn:
-            conn.close()
-
-
-def assign_alias_to_brand(alias: str, brand_name: str) -> None:
-    clean_alias = (alias or "").strip()
-    clean_brand = (brand_name or "").strip()
-    if not clean_alias or not clean_brand:
-        return
-    alias_norm = _normalize_key(clean_alias)
-
-    conn = get_connection()
-    try:
-        _ensure_tables(conn)
-        conn.execute(
-            "INSERT OR IGNORE INTO brands (name, active) VALUES (?, 1)",
-            (clean_brand,),
-        )
-        brand_row = conn.execute(
-            "SELECT id FROM brands WHERE name = ?",
-            (clean_brand,),
-        ).fetchone()
-        if not brand_row:
-            return
-        brand_id = brand_row[0]
-
-        conn.execute(
-            """
-            INSERT INTO brand_aliases (brand_id, alias, alias_norm, source)
-            VALUES (?, ?, ?, 'manual')
-            ON CONFLICT(alias_norm) DO UPDATE SET
-                brand_id = excluded.brand_id,
-                alias = excluded.alias
-            """,
-            (brand_id, clean_alias, alias_norm),
-        )
-        conn.execute(
-            "DELETE FROM pending_brand_aliases WHERE name_norm = ?",
-            (alias_norm,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def create_brand_and_assign_alias(brand_name: str, alias: Optional[str] = None) -> None:
-    clean_brand = (brand_name or "").strip()
-    if not clean_brand:
-        return
-    assign_alias_to_brand(alias or clean_brand, clean_brand)
-
-
-def defer_unmapped_brand(raw_name: str) -> None:
-    norm = _normalize_key(raw_name)
+    norm = normalize_brand_alias(clean_name)
     if not norm:
         return
+    platform = platform or ""
+ 
+    _ensure_fresh_table(cur, _PENDING_TABLE, {"name_norm", "platform", "status"}, _PENDING_CREATE_SQL)
+    cur.execute(
+        f"""
+        INSERT INTO {_PENDING_TABLE} (raw_name, name_norm, platform, source_type, occurrences, status)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT(name_norm, platform) DO UPDATE SET
+            raw_name = excluded.raw_name,
+            occurrences = {_PENDING_TABLE}.occurrences + 1,
+            source_type = excluded.source_type,
+            status = CASE WHEN {_PENDING_TABLE}.status = 'deferred' THEN 'deferred' ELSE excluded.status END,
+            last_seen = CURRENT_TIMESTAMP
+        """,
+        (clean_name, norm, platform, source_type, status),
+    )
+ 
+ 
+def defer_unmapped_brand(raw_name: str, platform: str = "") -> None:
+    """Marks a raw name as 'deal with later' so it stops showing in the
+    unmapped list, without creating a brand or alias for it."""
+    clean_name = (raw_name or "").strip()
+    norm = normalize_brand_alias(clean_name)
+    if not norm:
+        return
+    platform = platform or ""
+ 
     conn = get_connection()
     try:
         _ensure_tables(conn)
-        conn.execute(
-            "UPDATE pending_brand_aliases SET status = 'deferred' WHERE name_norm = ?",
-            (norm,),
+        result = conn.execute(
+            f"""
+            UPDATE {_PENDING_TABLE}
+            SET status = 'deferred', last_seen = CURRENT_TIMESTAMP
+            WHERE name_norm = ? AND platform = ?
+            """,
+            (norm, platform),
         )
+        if result.rowcount == 0:
+            conn.execute(
+                f"""
+                INSERT INTO {_PENDING_TABLE} (raw_name, name_norm, platform, source_type, occurrences, status)
+                VALUES (?, ?, ?, 'manual', 1, 'deferred')
+                ON CONFLICT(name_norm, platform) DO UPDATE SET
+                    status = 'deferred', last_seen = CURRENT_TIMESTAMP
+                """,
+                (clean_name, norm, platform),
+            )
         conn.commit()
     finally:
         conn.close()
-
-
-def delete_brand_alias(alias_id: int) -> None:
+ 
+ 
+# ---------------------------------------------------------------------------
+# Alias assignment
+# ---------------------------------------------------------------------------
+ 
+def assign_alias_to_brand(
+    alias: str,
+    brand_id: int,
+    platform: str = "",
+    reapply: bool = False,
+) -> Dict[str, Any]:
+    """Maps a raw restaurant name to an existing brand (brand_aliases +
+    platform_aliases), clears it from the pending list, and optionally
+    reapplies it to already-imported unmapped orders/reports."""
+    clean_alias = (alias or "").strip()
+    if not clean_alias:
+        raise ValueError("Alias name cannot be empty.")
+    norm = normalize_brand_alias(clean_alias)
+    if not norm:
+        raise ValueError("Alias name cannot be empty after normalization.")
+    platform = platform or ""
+ 
     conn = get_connection()
     try:
         _ensure_tables(conn)
-        conn.execute("DELETE FROM brand_aliases WHERE id = ?", (int(alias_id),))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def reapply_all_brand_aliases() -> Dict[str, int]:
-    updated_reports = 0
-    updated_orders = 0
-    conn = get_connection()
-    try:
-        _ensure_tables(conn)
-        rows = conn.execute(
+        brand_row = conn.execute(
+            "SELECT id, name, location_id FROM brands WHERE id = ?", (int(brand_id),)
+        ).fetchone()
+        if not brand_row:
+            raise ValueError(f"Brand with id={brand_id} does not exist.")
+ 
+        conn.execute(
             """
-            SELECT ba.alias_norm, b.name
-            FROM brand_aliases ba
-            JOIN brands b ON b.id = ba.brand_id
+            INSERT INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(normalized_alias) DO UPDATE SET
+                brand_id = excluded.brand_id,
+                platform = excluded.platform,
+                alias_name = excluded.alias_name
+            """,
+            (int(brand_id), platform, clean_alias, norm),
+        )
+        conn.execute(
+            """
+            INSERT INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(csv_venue_name) DO UPDATE SET
+                platform = excluded.platform,
+                location_id = excluded.location_id,
+                brand_id = excluded.brand_id
+            """,
+            (clean_alias, platform, brand_row["location_id"], int(brand_id)),
+        )
+        conn.execute(f"DELETE FROM {_PENDING_TABLE} WHERE name_norm = ?", (norm,))
+        conn.commit()
+        brand_name = brand_row["name"]
+    finally:
+        conn.close()
+ 
+    if reapply:
+        reapply_all_brand_aliases()
+ 
+    return {"brand_id": int(brand_id), "brand_name": brand_name}
+ 
+ 
+def create_brand_and_assign_alias(
+    brand_name: str,
+    raw_name: Optional[str] = None,
+    platform: str = "",
+) -> Dict[str, Any]:
+    """Creates a new brand (under the first/default location, same convention
+    as importer.py's auto-create path) and maps raw_name to it."""
+    clean_brand = (brand_name or "").strip()
+    if not clean_brand:
+        raise ValueError("Brand name cannot be empty.")
+    alias = (raw_name or clean_brand).strip()
+ 
+    conn = get_connection()
+    try:
+        loc_row = conn.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()
+        if loc_row:
+            loc_id = int(loc_row["id"])
+        else:
+            cur = conn.execute("INSERT INTO locations (name) VALUES (?)", ("Main Kitchen",))
+            loc_id = int(cur.lastrowid)
+ 
+        conn.execute(
+            "INSERT INTO brands (location_id, name, status) VALUES (?, ?, 'Active')",
+            (loc_id, clean_brand),
+        )
+        brand_row = conn.execute(
+            "SELECT id FROM brands WHERE location_id = ? AND name = ?",
+            (loc_id, clean_brand),
+        ).fetchone()
+        brand_id = int(brand_row["id"])
+        conn.commit()
+    finally:
+        conn.close()
+ 
+    return assign_alias_to_brand(alias, brand_id, platform=platform, reapply=True)
+ 
+ 
+def delete_brand_alias(alias_id: int, unmap_matching_records: bool = False) -> None:
+    """Removes an alias mapping. unmap_matching_records only stops that exact
+    raw name from auto-matching on FUTURE imports (via platform_aliases); it
+    deliberately does not touch orders/reports already linked to a brand."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT alias_name FROM brand_aliases WHERE id = ?", (int(alias_id),)
+        ).fetchone()
+        conn.execute("DELETE FROM brand_aliases WHERE id = ?", (int(alias_id),))
+        if unmap_matching_records and row:
+            conn.execute(
+                "DELETE FROM platform_aliases WHERE csv_venue_name = ?",
+                (row["alias_name"],),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+ 
+ 
+def reapply_all_brand_aliases() -> Dict[str, int]:
+    """Scans currently-unmapped orders and payout_reports and tries to attach
+    them to a brand using brand_aliases / brand names, now that new aliases
+    may have been registered."""
+    conn = get_connection()
+    try:
+        _ensure_tables(conn)
+ 
+        alias_rows = conn.execute(
+            "SELECT normalized_alias, platform, brand_id FROM brand_aliases"
+        ).fetchall()
+        alias_map: Dict[tuple, int] = {}
+        alias_map_any_platform: Dict[str, int] = {}
+        for r in alias_rows:
+            key = (r["normalized_alias"], r["platform"] or "")
+            alias_map.setdefault(key, r["brand_id"])
+            alias_map_any_platform.setdefault(r["normalized_alias"], r["brand_id"])
+ 
+        for r in conn.execute("SELECT id, name FROM brands").fetchall():
+            alias_map_any_platform.setdefault(normalize_brand_alias(r["name"]), r["id"])
+ 
+        def _lookup(norm: str, platform: str) -> Optional[int]:
+            if not norm:
+                return None
+            hit = alias_map.get((norm, platform or ""))
+            if hit is not None:
+                return hit
+            return alias_map_any_platform.get(norm)
+ 
+        updated_orders = 0
+        order_rows = conn.execute(
+            """
+            SELECT id, source_venue_name, platform
+            FROM orders
+            WHERE brand_id IS NULL AND source_venue_name IS NOT NULL AND TRIM(source_venue_name) != ''
             """
         ).fetchall()
-
-        alias_map = {r[0]: r[1] for r in rows}
-        brand_rows = conn.execute("SELECT name FROM brands").fetchall()
-        for (bname,) in brand_rows:
-            alias_map.setdefault(_normalize_key(bname), bname)
-
-        # Aktualizacja payout_reports jeśli kolumna brand istnieje
-        cols_pr = [c[1] for c in conn.execute("PRAGMA table_info(payout_reports)").fetchall()]
-        if "brand" in cols_pr:
-            for norm_key, target_brand in alias_map.items():
-                cur = conn.execute(
-                    "UPDATE payout_reports SET brand = ? WHERE lower(trim(brand)) = ? AND coalesce(brand, '') != ?",
-                    (target_brand, norm_key, target_brand),
-                )
-                updated_reports += cur.rowcount or 0
-
-        # Aktualizacja orders jeśli kolumna brand istnieje
-        cols_ord = [c[1] for c in conn.execute("PRAGMA table_info(orders)").fetchall()]
-        if "brand" in cols_ord:
-            for norm_key, target_brand in alias_map.items():
-                cur = conn.execute(
-                    "UPDATE orders SET brand = ? WHERE lower(trim(brand)) = ? AND coalesce(brand, '') != ?",
-                    (target_brand, norm_key, target_brand),
-                )
-                updated_orders += cur.rowcount or 0
-
+        for row in order_rows:
+            brand_id = _lookup(normalize_brand_alias(row["source_venue_name"]), row["platform"])
+            if brand_id is None:
+                continue
+            brand = conn.execute(
+                "SELECT location_id FROM brands WHERE id = ?", (brand_id,)
+            ).fetchone()
+            if not brand:
+                continue
+            conn.execute(
+                "UPDATE orders SET brand_id = ?, location_id = ? WHERE id = ?",
+                (brand_id, brand["location_id"], row["id"]),
+            )
+            updated_orders += 1
+ 
+        updated_reports = 0
+        updated_cost_items = 0
+        report_rows = conn.execute(
+            """
+            SELECT id, raw_restaurant_name, platform
+            FROM payout_reports
+            WHERE brand_id IS NULL AND raw_restaurant_name IS NOT NULL AND TRIM(raw_restaurant_name) != ''
+            """
+        ).fetchall()
+        for row in report_rows:
+            brand_id = _lookup(normalize_brand_alias(row["raw_restaurant_name"]), row["platform"])
+            if brand_id is None:
+                continue
+            conn.execute("UPDATE payout_reports SET brand_id = ? WHERE id = ?", (brand_id, row["id"]))
+            updated_reports += 1
+            cur = conn.execute(
+                "UPDATE payout_cost_items SET brand_id = ? WHERE payout_report_id = ? AND brand_id IS NULL",
+                (brand_id, row["id"]),
+            )
+            updated_cost_items += cur.rowcount or 0
+ 
         conn.commit()
         return {
-            "updated_reports": updated_reports,
             "updated_orders": updated_orders,
+            "updated_reports": updated_reports,
+            "updated_cost_items": updated_cost_items,
         }
     finally:
         conn.close()
-
-
+ 
+ 
+# ---------------------------------------------------------------------------
+# Snapshot for the Settings / Brand Management screen
+# ---------------------------------------------------------------------------
+ 
 def get_brand_management_snapshot() -> Dict[str, Any]:
     conn = get_connection()
     try:
         _ensure_tables(conn)
+ 
         brands: List[Dict[str, Any]] = [
-            {"id": r[0], "name": r[1], "active": bool(r[2])}
-            for r in conn.execute("SELECT id, name, active FROM brands ORDER BY name COLLATE NOCASE").fetchall()
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "status": r["status"],
+                "location_name": r["location_name"],
+            }
+            for r in conn.execute(
+                """
+                SELECT b.id, b.name, b.status, l.name as location_name
+                FROM brands b
+                JOIN locations l ON l.id = b.location_id
+                ORDER BY l.name COLLATE NOCASE, b.name COLLATE NOCASE
+                """
+            ).fetchall()
         ]
+ 
         aliases: List[Dict[str, Any]] = [
             {
-                "id": r[0],
-                "brand_id": r[1],
-                "brand_name": r[2],
-                "alias": r[3],
-                "source": r[4],
+                "id": r["id"],
+                "alias_name": r["alias_name"],
+                "platform": r["platform"] or "",
+                "brand_id": r["brand_id"],
+                "brand_name": r["brand_name"],
             }
             for r in conn.execute(
                 """
-                SELECT ba.id, ba.brand_id, b.name, ba.alias, ba.source
+                SELECT ba.id, ba.alias_name, ba.platform, ba.brand_id, b.name as brand_name
                 FROM brand_aliases ba
                 JOIN brands b ON b.id = ba.brand_id
-                ORDER BY b.name COLLATE NOCASE, ba.alias COLLATE NOCASE
+                ORDER BY b.name COLLATE NOCASE, ba.alias_name COLLATE NOCASE
                 """
             ).fetchall()
         ]
-        pending: List[Dict[str, Any]] = [
-            {
-                "raw_name": r[0],
-                "platform": r[1],
-                "source_file": r[2],
-                "occurrences": r[3],
-                "status": r[4],
-                "last_seen": r[5],
-            }
-            for r in conn.execute(
-                """
-                SELECT raw_name, platform, source_file, occurrences, status, last_seen
-                FROM pending_brand_aliases
-                WHERE status != 'deferred'
-                ORDER BY occurrences DESC, raw_name COLLATE NOCASE
-                """
-            ).fetchall()
-        ]
+ 
+        orders_unmapped = conn.execute(
+            """
+            SELECT source_venue_name AS raw_name, COALESCE(platform, '') AS platform,
+                   COUNT(*) AS cnt, SUM(COALESCE(total_sales, 0.0)) AS total,
+                   MIN(date(order_datetime)) AS dmin, MAX(date(order_datetime)) AS dmax
+            FROM orders
+            WHERE brand_id IS NULL AND source_venue_name IS NOT NULL AND TRIM(source_venue_name) != ''
+            GROUP BY source_venue_name, platform
+            """
+        ).fetchall()
+ 
+        reports_unmapped = conn.execute(
+            """
+            SELECT raw_restaurant_name AS raw_name, COALESCE(platform, '') AS platform,
+                   COUNT(*) AS cnt, SUM(COALESCE(gross_sales_report, 0.0)) AS total,
+                   MIN(period_start) AS dmin, MAX(period_end) AS dmax
+            FROM payout_reports
+            WHERE brand_id IS NULL AND raw_restaurant_name IS NOT NULL AND TRIM(raw_restaurant_name) != ''
+            GROUP BY raw_restaurant_name, platform
+            """
+        ).fetchall()
+ 
+        status_map = {
+            (r["name_norm"], r["platform"] or ""): r["status"]
+            for r in conn.execute(f"SELECT name_norm, platform, status FROM {_PENDING_TABLE}").fetchall()
+        }
+ 
+        merged: Dict[tuple, Dict[str, Any]] = {}
+ 
+        def _merge(raw_name, platform, kind, cnt, total, dmin, dmax):
+            norm = normalize_brand_alias(raw_name)
+            key = (norm, platform or "")
+            entry = merged.setdefault(
+                key,
+                {
+                    "raw_name": raw_name,
+                    "platform": platform or "",
+                    "orders_count": 0,
+                    "orders_sales": 0.0,
+                    "reports_count": 0,
+                    "reports_gross_sales": 0.0,
+                    "date_min": None,
+                    "date_max": None,
+                },
+            )
+            if kind == "orders":
+                entry["orders_count"] += cnt
+                entry["orders_sales"] += float(total or 0.0)
+            else:
+                entry["reports_count"] += cnt
+                entry["reports_gross_sales"] += float(total or 0.0)
+            if dmin and (entry["date_min"] is None or dmin < entry["date_min"]):
+                entry["date_min"] = dmin
+            if dmax and (entry["date_max"] is None or dmax > entry["date_max"]):
+                entry["date_max"] = dmax
+ 
+        for r in orders_unmapped:
+            _merge(r["raw_name"], r["platform"], "orders", r["cnt"], r["total"], r["dmin"], r["dmax"])
+        for r in reports_unmapped:
+            _merge(r["raw_name"], r["platform"], "reports", r["cnt"], r["total"], r["dmin"], r["dmax"])
+ 
+        unmapped_candidates: List[Dict[str, Any]] = []
+        for key, entry in merged.items():
+            status = status_map.get(key, "pending")
+            if status == "deferred":
+                continue
+            entry["status"] = status
+            unmapped_candidates.append(entry)
+        unmapped_candidates.sort(
+            key=lambda e: (e["orders_count"] + e["reports_count"]), reverse=True
+        )
+ 
         return {
-            "auto_create_brands": get_auto_create_brands_setting(),
+            "auto_create_unknown_brands": get_auto_create_brands_setting(),
             "brands": brands,
             "aliases": aliases,
-            "pending": pending,
+            "unmapped_candidates": unmapped_candidates,
             "summary_json": json.dumps(
                 {
                     "brands_count": len(brands),
                     "aliases_count": len(aliases),
-                    "pending_count": len(pending),
+                    "unmapped_count": len(unmapped_candidates),
                 }
             ),
         }
     finally:
         conn.close()
+ 

@@ -369,7 +369,7 @@ class CustomMapperDialog(ctk.CTkToplevel):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            importer = CSVImporter()
+            importer = CSVImporter(auto_create_brands=brand_service.get_auto_create_brands_setting())
             res = importer.auto_import_file(self.filepath, override_mapping=mapping, override_platform=tmpl_name)
         finally:
             self.configure(cursor="")
@@ -1446,7 +1446,7 @@ class GastroAnalyticsApp(ctk.CTk):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            importer = CSVImporter()
+            importer = CSVImporter(auto_create_brands=brand_service.get_auto_create_brands_setting())
             for path in filepaths:
                 try:
                     res = importer.auto_import_file(path)
@@ -1586,7 +1586,9 @@ class GastroAnalyticsApp(ctk.CTk):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            res = import_day_folder_recursive(folder)
+            res = import_day_folder_recursive(
+                folder, auto_create_brands=brand_service.get_auto_create_brands_setting()
+            )
         finally:
             self.configure(cursor="")
 
@@ -2418,7 +2420,11 @@ class GastroAnalyticsApp(ctk.CTk):
         folder = filedialog.askdirectory(title="Select folder with Bolt Food / Wolt payout reports")
         if not folder:
             return
-        res = import_payouts_recursive(folder, create_backup=True)
+        res = import_payouts_recursive(
+            folder,
+            auto_create_brands=brand_service.get_auto_create_brands_setting(),
+            create_backup=True,
+        )
         self.refresh_finances_tab()
         messagebox.showinfo(
             "Payout Import Summary",
@@ -2432,7 +2438,9 @@ class GastroAnalyticsApp(ctk.CTk):
         folder = filedialog.askdirectory(title="Select day folder with sales/orders and payout reports")
         if not folder:
             return
-        res = import_day_folder_recursive(folder)
+        res = import_day_folder_recursive(
+            folder, auto_create_brands=brand_service.get_auto_create_brands_setting()
+        )
         p_res = res.get("payouts", {}) if isinstance(res, dict) else {}
         o_res = res.get("orders", {}) if isinstance(res, dict) else {}
         p_errs = p_res.get("errors", []) or []

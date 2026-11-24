@@ -520,4 +520,138 @@ def get_brand_management_snapshot() -> Dict[str, Any]:
         }
     finally:
         conn.close()
- 
+
+
+def set_brand_status(brand_id: int, status: str) -> str:
+    """Sets a restaurant/brand status to 'Active' or 'Inactive'."""
+    normalized_status = "Active" if str(status).strip().lower() == "active" else "Inactive"
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM brands WHERE id = ?", (int(brand_id),)).fetchone()
+        if not row:
+            raise ValueError(f"Brand with id={brand_id} does not exist.")
+        conn.execute(
+            "UPDATE brands SET status = ? WHERE id = ?",
+            (normalized_status, int(brand_id)),
+        )
+        conn.commit()
+        return normalized_status
+    finally:
+        conn.close()
+
+
+def assign_brand_to_location(brand_id: int, location_id: int, reassign_records: bool = True) -> None:
+    """Moves/links an existing restaurant/brand to a target location and optionally updates related records."""
+    conn = get_connection()
+    try:
+        brand = conn.execute("SELECT id FROM brands WHERE id = ?", (int(brand_id),)).fetchone()
+        if not brand:
+            raise ValueError(f"Brand with id={brand_id} does not exist.")
+        loc = conn.execute("SELECT id FROM locations WHERE id = ?", (int(location_id),)).fetchone()
+        if not loc:
+            raise ValueError(f"Location with id={location_id} does not exist.")
+
+        target_loc_id = int(location_id)
+        target_brand_id = int(brand_id)
+
+        conn.execute(
+            "UPDATE brands SET location_id = ? WHERE id = ?",
+            (target_loc_id, target_brand_id),
+        )
+        conn.execute(
+            "UPDATE platform_aliases SET location_id = ? WHERE brand_id = ?",
+            (target_loc_id, target_brand_id),
+        )
+        if reassign_records:
+            conn.execute(
+                "UPDATE orders SET location_id = ? WHERE brand_id = ?",
+                (target_loc_id, target_brand_id),
+            )
+            conn.execute(
+                "UPDATE order_items SET location_id = ? WHERE brand_id = ?",
+                (target_loc_id, target_brand_id),
+            )
+            conn.execute(
+                "UPDATE OR IGNORE operating_calendar SET location_id = ? WHERE brand_id = ?",
+                (target_loc_id, target_brand_id),
+            )
+            conn.execute(
+                "DELETE FROM operating_calendar WHERE brand_id = ? AND location_id != ?",
+                (target_brand_id, target_loc_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_brand_settings(brand_id: int) -> Dict[str, Any]:
+    """Returns settings and alias summary for a single restaurant/brand."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT b.id, b.name, b.status, b.location_id, l.name AS location_name,
+                   (SELECT COUNT(*) FROM brand_aliases ba WHERE ba.brand_id = b.id) AS aliases_count,
+                   (SELECT COUNT(*) FROM orders o WHERE o.brand_id = b.id) AS orders_count
+            FROM brands b
+            JOIN locations l ON l.id = b.location_id
+            WHERE b.id = ?
+            """,
+            (int(brand_id),),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Brand with id={brand_id} does not exist.")
+        return {
+            "id": int(row["id"]),
+            "name": row["name"],
+            "status": row["status"] or "Active",
+            "location_id": int(row["location_id"]),
+            "location_name": row["location_name"],
+            "aliases_count": int(row["aliases_count"] or 0),
+            "orders_count": int(row["orders_count"] or 0),
+        }
+    finally:
+        conn.close()
+
+
+def update_brand_settings(brand_id: int, name: str, location_id: int, status: str) -> Dict[str, Any]:
+    """Updates name, location link, and Active/Inactive status for a single restaurant/brand."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("Brand name cannot be empty.")
+    normalized_status = "Active" if str(status).strip().lower() == "active" else "Inactive"
+
+    conn = get_connection()
+    try:
+        brand = conn.execute("SELECT id FROM brands WHERE id = ?", (int(brand_id),)).fetchone()
+        if not brand:
+            raise ValueError(f"Brand with id={brand_id} does not exist.")
+        loc = conn.execute("SELECT id FROM locations WHERE id = ?", (int(location_id),)).fetchone()
+        if not loc:
+            raise ValueError(f"Location with id={location_id} does not exist.")
+
+        conn.execute(
+            """
+            UPDATE brands
+            SET name = ?, location_id = ?, status = ?
+            WHERE id = ?
+            """,
+            (clean_name, int(location_id), normalized_status, int(brand_id)),
+        )
+        conn.execute(
+            "UPDATE platform_aliases SET location_id = ? WHERE brand_id = ?",
+            (int(location_id), int(brand_id)),
+        )
+        conn.execute(
+            "UPDATE orders SET location_id = ? WHERE brand_id = ?",
+            (int(location_id), int(brand_id)),
+        )
+        conn.execute(
+            "UPDATE order_items SET location_id = ? WHERE brand_id = ?",
+            (int(location_id), int(brand_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return get_brand_settings(int(brand_id))

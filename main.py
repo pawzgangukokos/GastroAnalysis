@@ -1626,7 +1626,7 @@ class GastroAnalyticsApp(ctk.CTk):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(2, weight=1)
 
-        # Row 0: Quick create (Location & Brand)
+        # Row 0: Quick create (Location & Brand) + Delete controls
         top_bar = ctk.CTkFrame(tab, fg_color=t["canvas"])
         top_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
 
@@ -1662,7 +1662,7 @@ class GastroAnalyticsApp(ctk.CTk):
             command=self._delete_location,
         ).pack(side="right", padx=(8, 2), pady=8)
 
-        # Row 1: Unmapped / Pending Aliases & Active Aliases (minimal controls)
+        # Row 1: Aliases + Selected Restaurant Settings (Active/Inactive + Location)
         alias_card = ctk.CTkFrame(tab, fg_color=t["canvas"])
         alias_card.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
         alias_card.grid_columnconfigure(0, weight=1)
@@ -1709,7 +1709,7 @@ class GastroAnalyticsApp(ctk.CTk):
         ctk.CTkButton(act_row, text="+ Create & Map", width=110, command=self._create_brand_for_alias).pack(side="left", padx=4)
 
         rem_row = ctk.CTkFrame(alias_card, fg_color="transparent")
-        rem_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+        rem_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 6))
         ctk.CTkLabel(rem_row, text="Active Alias:", font=self.font_bold).pack(side="left", padx=(0, 6))
         self.active_alias_cb = ctk.CTkComboBox(rem_row, width=380)
         self.active_alias_cb.pack(side="left", padx=4)
@@ -1721,6 +1721,43 @@ class GastroAnalyticsApp(ctk.CTk):
             hover_color=t["danger_hover"],
             command=self._remove_selected_alias,
         ).pack(side="left", padx=6)
+
+        # Row 4: Per-Restaurant Settings (Name, Location link, Active/Inactive status)
+        brand_cfg_row = ctk.CTkFrame(alias_card, fg_color=t["card"], corner_radius=6)
+        brand_cfg_row.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(brand_cfg_row, text="Restaurant Settings:", font=self.font_bold).pack(side="left", padx=(10, 6), pady=6)
+        self.edit_brand_id_var = tk.StringVar(value="")
+
+        self.edit_brand_name_entry = ctk.CTkEntry(brand_cfg_row, placeholder_text="Restaurant name", width=165)
+        self.edit_brand_name_entry.pack(side="left", padx=4, pady=6)
+
+        ctk.CTkLabel(brand_cfg_row, text="Location:").pack(side="left", padx=(8, 2), pady=6)
+        self.edit_brand_loc_cb = ctk.CTkComboBox(brand_cfg_row, width=140)
+        self.edit_brand_loc_cb.pack(side="left", padx=4, pady=6)
+
+        ctk.CTkLabel(brand_cfg_row, text="Status:").pack(side="left", padx=(8, 2), pady=6)
+        self.edit_brand_status_cb = ctk.CTkComboBox(brand_cfg_row, values=["Active", "Inactive"], width=105)
+        self.edit_brand_status_cb.set("Active")
+        self.edit_brand_status_cb.pack(side="left", padx=4, pady=6)
+
+        ctk.CTkButton(
+            brand_cfg_row,
+            text="Save Restaurant",
+            width=125,
+            command=self._save_selected_brand_settings,
+        ).pack(side="right", padx=(4, 10), pady=6)
+
+        ctk.CTkButton(
+            brand_cfg_row,
+            text="Toggle Active/Inactive",
+            width=145,
+            fg_color="transparent",
+            border_width=1,
+            border_color=t["ghost_border"],
+            text_color=t["text"],
+            command=self._toggle_selected_brand_status,
+        ).pack(side="right", padx=4, pady=6)
 
         # Row 2: Brands list
         b_cols = ("ID", "Location", "Brand", "Status")
@@ -1736,7 +1773,6 @@ class GastroAnalyticsApp(ctk.CTk):
         self.brands_tree.grid(row=0, column=0, sticky="nsew")
         b_vsb.grid(row=0, column=1, sticky="ns")
         self.brands_tree.bind("<<TreeviewSelect>>", self._on_brand_tree_select)
-
     def _refresh_after_brand_change(self):
         if hasattr(self, "invalidate_analytics_cache"):
             self.invalidate_analytics_cache()
@@ -1756,7 +1792,69 @@ class GastroAnalyticsApp(ctk.CTk):
                     fn()
 
     def _on_brand_tree_select(self, _event=None):
-        return
+        sel = self.brands_tree.selection()
+        if not sel:
+            return
+        vals = self.brands_tree.item(sel[0], "values")
+        if not vals:
+            return
+        self.edit_brand_id_var.set(str(vals[0]))
+        self.edit_brand_name_entry.delete(0, "end")
+        self.edit_brand_name_entry.insert(0, str(vals[2]))
+        loc_vals = self.edit_brand_loc_cb.cget("values") or []
+        if str(vals[1]) in loc_vals:
+            self.edit_brand_loc_cb.set(str(vals[1]))
+        status_val = "Active" if str(vals[3]).strip().lower() == "active" else "Inactive"
+        self.edit_brand_status_cb.set(status_val)
+
+    @safe_action
+    def _save_selected_brand_settings(self):
+        brand_id_str = self.edit_brand_id_var.get().strip()
+        if not brand_id_str:
+            sel = self.brands_tree.selection()
+            if sel:
+                brand_id_str = str(self.brands_tree.item(sel[0], "values")[0])
+        if not brand_id_str:
+            messagebox.showwarning("No Selection", "Select a restaurant/brand from the table first.")
+            return
+
+        loc_name = self.edit_brand_loc_cb.get().strip()
+        loc_id = self.location_map.get(loc_name)
+        if not loc_id:
+            messagebox.showwarning("Missing Location", "Select a valid location.")
+            return
+
+        new_name = self.edit_brand_name_entry.get().strip()
+        status_val = self.edit_brand_status_cb.get().strip() or "Active"
+        updated = brand_service.update_brand_settings(
+            brand_id=int(brand_id_str),
+            name=new_name,
+            location_id=int(loc_id),
+            status=status_val,
+        )
+        self._refresh_after_brand_change()
+        messagebox.showinfo(
+            "Saved",
+            f"Updated '{updated['name']}' -> Location: {updated['location_name']} ({updated['status']}).",
+        )
+
+    @safe_action
+    def _toggle_selected_brand_status(self):
+        brand_id_str = self.edit_brand_id_var.get().strip()
+        if not brand_id_str:
+            sel = self.brands_tree.selection()
+            if sel:
+                brand_id_str = str(self.brands_tree.item(sel[0], "values")[0])
+        if not brand_id_str:
+            messagebox.showwarning("No Selection", "Select a restaurant/brand from the table first.")
+            return
+
+        current_status = self.edit_brand_status_cb.get().strip()
+        next_status = "Inactive" if current_status.lower() == "active" else "Active"
+        new_st = brand_service.set_brand_status(int(brand_id_str), next_status)
+        self.edit_brand_status_cb.set(new_st)
+        self._refresh_after_brand_change()
+        messagebox.showinfo("Status Updated", f"Restaurant status changed to {new_st}.")
 
     def _on_unmapped_tree_select(self, _event=None):
         sel = self.unmapped_tree.selection()
@@ -2192,7 +2290,7 @@ class GastroAnalyticsApp(ctk.CTk):
                     dup_labels.append(alias_label)
 
             loc_names = list(self.location_map.keys())
-            for cb_attr in ('new_brand_loc_cb', 'move_brand_loc_cb', 'del_loc_cb'):
+            for cb_attr in ('new_brand_loc_cb', 'edit_brand_loc_cb', 'move_brand_loc_cb', 'del_loc_cb'):
                 if hasattr(self, cb_attr):
                     cb_widget = getattr(self, cb_attr)
                     cb_widget.configure(values=loc_names if loc_names else [""])

@@ -655,3 +655,97 @@ def update_brand_settings(brand_id: int, name: str, location_id: int, status: st
         conn.close()
 
     return get_brand_settings(int(brand_id))
+
+
+def merge_restaurants_into_target(source_brand_id: int, target_brand_id: int) -> dict:
+    """Merges source_brand_id into target_brand_id, moves orders/items/reports/costs,
+    and saves source brand name & aliases as aliases of target_brand_id for future imports."""
+    from importer import merge_brands
+
+    src_id = int(source_brand_id)
+    tgt_id = int(target_brand_id)
+    if src_id == tgt_id:
+        raise ValueError("Source and target restaurants must be different.")
+
+    conn = get_connection()
+    try:
+        src_row = conn.execute("SELECT id, name, location_id FROM brands WHERE id = ?", (src_id,)).fetchone()
+        tgt_row = conn.execute("SELECT id, name, location_id FROM brands WHERE id = ?", (tgt_id,)).fetchone()
+        if not src_row or not tgt_row:
+            raise ValueError("Source or target restaurant does not exist.")
+        src_name = str(src_row["name"])
+        tgt_name = str(tgt_row["name"])
+        tgt_loc_id = int(tgt_row["location_id"])
+
+        old_aliases = conn.execute(
+            "SELECT alias_name, platform FROM brand_aliases WHERE brand_id = ?", (src_id,)
+        ).fetchall()
+        old_plat_aliases = conn.execute(
+            "SELECT csv_venue_name, platform FROM platform_aliases WHERE brand_id = ?", (src_id,)
+        ).fetchall()
+        raw_report_names = conn.execute(
+            "SELECT DISTINCT raw_restaurant_name, platform FROM payout_reports WHERE brand_id = ? AND raw_restaurant_name IS NOT NULL",
+            (src_id,),
+        ).fetchall()
+        raw_order_names = conn.execute(
+            "SELECT DISTINCT source_venue_name, platform FROM orders WHERE brand_id = ? AND source_venue_name IS NOT NULL",
+            (src_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    moved_orders = merge_brands(src_id, tgt_id)
+
+    conn = get_connection()
+    try:
+        candidates = [(src_name, "")]
+        for r in old_aliases:
+            candidates.append((r["alias_name"], r["platform"] or ""))
+        for r in old_plat_aliases:
+            candidates.append((r["csv_venue_name"], r["platform"] or ""))
+        for r in raw_report_names:
+            candidates.append((r["raw_restaurant_name"], r["platform"] or ""))
+        for r in raw_order_names:
+            candidates.append((r["source_venue_name"], r["platform"] or ""))
+
+        saved_aliases = 0
+        for raw_n, plat in candidates:
+            clean_n = (raw_n or "").strip()
+            norm = normalize_brand_alias(clean_n)
+            if not clean_n or not norm:
+                continue
+            conn.execute(
+                """
+                INSERT INTO brand_aliases (brand_id, platform, alias_name, normalized_alias)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(normalized_alias) DO UPDATE SET
+                    brand_id = excluded.brand_id,
+                    platform = COALESCE(NULLIF(excluded.platform, ''), brand_aliases.platform),
+                    alias_name = excluded.alias_name
+                """,
+                (tgt_id, plat or "", clean_n, norm),
+            )
+            conn.execute(
+                """
+                INSERT INTO platform_aliases (csv_venue_name, platform, location_id, brand_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(csv_venue_name) DO UPDATE SET
+                    platform = COALESCE(NULLIF(excluded.platform, ''), platform_aliases.platform),
+                    location_id = excluded.location_id,
+                    brand_id = excluded.brand_id
+                """,
+                (clean_n, plat or "", tgt_loc_id, tgt_id),
+            )
+            conn.execute(f"DELETE FROM {_PENDING_TABLE} WHERE name_norm = ?", (norm,))
+            saved_aliases += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "source_name": src_name,
+        "target_name": tgt_name,
+        "moved_orders": int(moved_orders or 0),
+        "saved_aliases": saved_aliases,
+    }

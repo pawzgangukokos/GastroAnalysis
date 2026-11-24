@@ -593,8 +593,22 @@ def parse_wolt_pdf_text(text: str, filename: str = "") -> ParsedPayoutReport:
         or "total goods daily" in low_text
     )
     if is_sales_report and "payout report" not in low_text and "wolt commission" not in low_text:
-        raise ValueError(
-            f"Skipping Wolt sales report ('{filename}'): only payout and merchant invoice documents are processed."
+        warnings.append(
+            f"Wolt sales report ('{filename}') skipped for cost/payout calculation (processed via order/sales reports)."
+        )
+        return ParsedPayoutReport(
+            platform="Wolt",
+            document_type="sales_report",
+            raw_restaurant_name=restaurant_name,
+            period_start=period_start,
+            period_end=period_end,
+            currency=currency,
+            document_number=doc_num,
+            gross_sales_report=0.0,
+            payout_amount_gross=0.0,
+            cost_items=[],
+            parse_status="partial",
+            parse_warnings=warnings,
         )
 
     is_invoice = (

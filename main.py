@@ -108,7 +108,7 @@ class TopDishesDialog(ctk.CTkToplevel):
             if total_db_items == 0:
                 msg = (
                     "The dish items table (order_items) in the database is currently empty.\n\n"
-                    "Please re-import your Wolt or POS CSV files via Data & Calendar -> Import CSV "
+                    "Please re-import your Wolt or POS CSV files via Settings & Import -> Import CSV "
                     "to extract and populate individual dish names."
                 )
             else:
@@ -176,11 +176,11 @@ GastroAnalytics helps you understand how your kitchen and delivery channels perf
 2. STEP-BY-STEP WORKFLOW (FOR EVERYDAY USE)
 Step A — Import Order Files:
 1. Export order CSV files from Bolt, Wolt, or your POS/export folder.
-2. Open "Data & Calendar" -> "Import CSV" (or folder import).
+2. Open "Settings & Import" -> "Import CSV" (or folder import).
 3. Duplicate orders are skipped automatically. Cancelled, rejected, refunded, or void orders do not count as completed sales.
 
 Step B — Check the Operating Calendar:
-1. Open "Data & Calendar" and review dates marked as Open, Closed, or Disrupted.
+1. Open "Settings & Import" and review dates marked as Open, Closed, or Disrupted.
 2. Mark days when the kitchen was closed or had major disruptions so daily averages and operating comparisons stay realistic.
 
 Step C — Merge Duplicate Brand Names:
@@ -417,7 +417,7 @@ class GastroAnalyticsApp(ctk.CTk):
         self.location_map = {}
         self._analytics_cache = {}
         self._last_dashboard_key = None
-        self._dirty_tabs = {"dashboard", "daily", "data", "finances", "settings"}
+        self._dirty_tabs = {"dashboard", "daily", "finances", "settings"}
 
         self.font_body = ctk.CTkFont(family=FONT_FAMILY, size=13)
         self.font_bold = ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold")
@@ -525,7 +525,6 @@ class GastroAnalyticsApp(ctk.CTk):
         nav_items = [
             ("dashboard", "Dashboard"),
             ("daily", "Daily Breakdown"),
-            ("data", "Data & Calendar"),
             ("finances", "Losses & Payouts"),
             ("settings", "Settings")
         ]
@@ -534,8 +533,6 @@ class GastroAnalyticsApp(ctk.CTk):
             btn.grid(row=idx, column=0, padx=12, pady=2, sticky="ew")
             self.nav_buttons[key] = btn
 
-        self.theme_btn = ctk.CTkButton(self.sidebar, text="Toggle Theme", command=self._toggle_theme, fg_color="transparent", text_color=t["text"], border_width=1, border_color=t["ghost_border"])
-        self.theme_btn.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
 
         self.guide_btn = ctk.CTkButton(self.sidebar, text="User Guide", command=lambda: UserGuideDialog(self, self.theme_mode), fg_color="transparent", text_color=t["text"], border_width=1, border_color=t["ghost_border"])
         self.guide_btn.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
@@ -546,85 +543,20 @@ class GastroAnalyticsApp(ctk.CTk):
         self.frames = {
             "dashboard": ctk.CTkFrame(self, fg_color="transparent"),
             "daily": ctk.CTkFrame(self, fg_color="transparent"),
-            "data": ctk.CTkFrame(self, fg_color="transparent"),
             "finances": ctk.CTkFrame(self, fg_color="transparent"),
             "settings": ctk.CTkFrame(self, fg_color="transparent"),
         }
         self._build_dashboard_tab()
         self._build_daily_breakdown_tab()
-        self._build_data_calendar_tab()
         self._build_finances_tab()
         self._build_settings_tab()
 
-    def _toggle_theme(self):
-        self._close_active_figures()
-        saved_state = {
-            "dash_start": self.dash_start_entry.get() if hasattr(self, "dash_start_entry") else None,
-            "dash_end": self.dash_end_entry.get() if hasattr(self, "dash_end_entry") else None,
-            "dash_loc": self.dash_location_cb.get() if hasattr(self, "dash_location_cb") else None,
-            "dash_brand": self.dash_brand_cb.get() if hasattr(self, "dash_brand_cb") else None,
-            "daily_start": self.daily_start_entry.get() if hasattr(self, "daily_start_entry") else None,
-            "daily_end": self.daily_end_entry.get() if hasattr(self, "daily_end_entry") else None,
-            "daily_loc": self.daily_location_cb.get() if hasattr(self, "daily_location_cb") else None,
-            "daily_brand": self.daily_brand_cb.get() if hasattr(self, "daily_brand_cb") else None,
-            "daily_scope": self.daily_scope_seg.get() if hasattr(self, "daily_scope_seg") else None,
-            "cal_start": self.cal_start_entry.get() if hasattr(self, "cal_start_entry") else None,
-            "cal_end": self.cal_end_entry.get() if hasattr(self, "cal_end_entry") else None,
-            "fin_from": self.fin_date_from.get() if hasattr(self, "fin_date_from") else None,
-            "fin_to": self.fin_date_to.get() if hasattr(self, "fin_date_to") else None,
-            "fin_plat": self.fin_platform_var.get() if hasattr(self, "fin_platform_var") else None,
-            "import_log": self.import_log_box.get("1.0", "end").strip() if hasattr(self, "import_log_box") and self.import_log_box.winfo_exists() else "",
-        }
-        self.theme_mode = "Dark" if self.theme_mode == "Light" else "Light"
-        ctk.set_appearance_mode(self.theme_mode)
-        for w in self.winfo_children():
-            w.destroy()
-        self._build_layout()
-        self._populate_global_dropdowns()
-
-        def _restore_entry(widget, val):
-            if val is not None and hasattr(self, widget):
-                ent = getattr(self, widget)
-                ent.delete(0, "end")
-                ent.insert(0, val)
-
-        def _restore_cb(widget, val):
-            if val and hasattr(self, widget):
-                cb = getattr(self, widget)
-                if val in cb.cget("values"):
-                    cb.set(val)
-
-        _restore_entry("dash_start_entry", saved_state["dash_start"])
-        _restore_entry("dash_end_entry", saved_state["dash_end"])
-        _restore_cb("dash_location_cb", saved_state["dash_loc"])
-        self._on_dash_location_change(self.dash_location_cb.get())
-        _restore_cb("dash_brand_cb", saved_state["dash_brand"])
-
-        _restore_entry("daily_start_entry", saved_state["daily_start"])
-        _restore_entry("daily_end_entry", saved_state["daily_end"])
-        if saved_state["daily_scope"] and hasattr(self, "daily_scope_seg"):
-            self.daily_scope_seg.set(saved_state["daily_scope"])
-        _restore_cb("daily_location_cb", saved_state["daily_loc"])
-        self._on_daily_location_change(self.daily_location_cb.get())
-        _restore_cb("daily_brand_cb", saved_state["daily_brand"])
-
-        _restore_entry("cal_start_entry", saved_state["cal_start"])
-        _restore_entry("cal_end_entry", saved_state["cal_end"])
-        _restore_entry("fin_date_from", saved_state["fin_from"])
-        _restore_entry("fin_date_to", saved_state["fin_to"])
-        if saved_state["fin_plat"] and hasattr(self, "fin_platform_var"):
-            self.fin_platform_var.set(saved_state["fin_plat"])
-
-        if saved_state["import_log"]:
-            self._append_import_log(saved_state["import_log"])
-
-        self.show_tab(self.current_tab, force=True)
 
     def mark_tabs_dirty(self, *tabs: str, clear_cache: bool = False):
         if clear_cache and hasattr(self, "invalidate_analytics_cache"):
             self.invalidate_analytics_cache()
         if not tabs:
-            self._dirty_tabs = {"dashboard", "daily", "data", "finances", "settings"}
+            self._dirty_tabs = {"dashboard", "daily", "finances", "settings"}
         else:
             self._dirty_tabs.update(tabs)
 
@@ -662,8 +594,6 @@ class GastroAnalyticsApp(ctk.CTk):
                 deferred = True
         elif tab_key == "daily":
             self.refresh_daily_breakdown()
-        elif tab_key == "data":
-            self.refresh_calendar_table()
         elif tab_key == "finances":
             self.refresh_finances_tab()
         elif tab_key == "settings":
@@ -715,8 +645,8 @@ class GastroAnalyticsApp(ctk.CTk):
         self.dash_end_entry.pack(side="left", padx=5, pady=10)
 
         ctk.CTkButton(top_bar, text="Apply", command=self.refresh_dashboard).pack(side="left", padx=10)
-        ctk.CTkButton(top_bar, text="Export PDF", command=self.export_pdf_report, fg_color="transparent", border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=10)
-        ctk.CTkButton(top_bar, text="Export .xlsx", command=self.export_excel_report, fg_color="transparent", border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=10)
+        ctk.CTkButton(top_bar, text="Export PDF", height=30, command=self.export_pdf_report, fg_color="transparent", hover_color=t["ghost_hover"], border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=(4, 12), pady=10)
+        ctk.CTkButton(top_bar, text="Export .xlsx", height=30, command=self.export_excel_report, fg_color="transparent", hover_color=t["ghost_hover"], border_width=1, border_color=t["ghost_border"], text_color=t["text"]).pack(side="right", padx=4, pady=10)
 
         # Content
         self.dash_scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -1145,12 +1075,14 @@ class GastroAnalyticsApp(ctk.CTk):
 
         ctk.CTkButton(
             filter_bar,
-            text="Export Daily CSV / Excel",
+            text="Export .xlsx / .csv",
+            height=30,
             command=self._export_daily_breakdown_file,
             fg_color="transparent",
+            hover_color=t["ghost_hover"],
             border_width=1,
             border_color=t["ghost_border"],
-            text_color=t["text"]
+            text_color=t["text"],
         ).pack(side="right", padx=12, pady=10)
 
         # Row 1: Summary Strip
@@ -1218,6 +1150,59 @@ class GastroAnalyticsApp(ctk.CTk):
         self.daily_tree.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=(12, 0))
         vsb.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=(12, 0))
         hsb.grid(row=1, column=0, sticky="ew", padx=(12, 0), pady=(0, 8))
+
+
+
+
+
+
+
+    # =========================================================================
+    # DATA & CALENDAR TAB
+    # =========================================================================
+
+
+    # =========================================================================
+    # SETTINGS TAB (ZERO-MAINTENANCE & LAYMAN-FRIENDLY)
+    # =========================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # --- Staffing Rules CRUD ---
+
+
+
+    # --- Meal Shifts CRUD ---
+
+
+
+
+
+    # --- Exclusions CRUD ---
+
+
+
+
+
+
+
 
     def _on_daily_location_change(self, loc_name: str):
         brands = self._get_brands_for_location(loc_name)
@@ -1378,51 +1363,6 @@ class GastroAnalyticsApp(ctk.CTk):
     # =========================================================================
     # DATA & CALENDAR TAB
     # =========================================================================
-    def _build_data_calendar_tab(self):
-        t = self._t()
-        parent = self.frames["data"]
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=1)
-
-        cal_card = ctk.CTkFrame(parent, fg_color=t["card"])
-        cal_card.grid(row=1, column=0, rowspan=2, sticky="nsew")
-        cal_card.grid_columnconfigure(0, weight=1)
-        cal_card.grid_rowconfigure(2, weight=1)
-
-        cal_filter = ctk.CTkFrame(cal_card, fg_color="transparent")
-        cal_filter.grid(row=0, column=0, sticky="ew", padx=14, pady=12)
-        self.cal_location_cb = ctk.CTkComboBox(cal_filter, command=self._on_cal_location_change)
-        self.cal_location_cb.pack(side="left", padx=4)
-        self.cal_brand_cb = ctk.CTkComboBox(cal_filter)
-        self.cal_brand_cb.pack(side="left", padx=4)
-
-        self.cal_start_entry, self.cal_end_entry = ctk.CTkEntry(cal_filter, width=100), ctk.CTkEntry(cal_filter, width=100)
-        self.cal_start_entry.insert(0, (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
-        self.cal_end_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
-        self.cal_start_entry.pack(side="left", padx=4)
-        self.cal_end_entry.pack(side="left", padx=4)
-        ctk.CTkButton(cal_filter, text="Apply", command=self.refresh_calendar_table).pack(side="right")
-
-        edit_bar = ctk.CTkFrame(cal_card, fg_color="transparent")
-        edit_bar.grid(row=1, column=0, sticky="ew", padx=14, pady=10)
-
-        self.cal_status_cb = ctk.CTkComboBox(edit_bar, values=["Open", "Closed", "Disrupted"], width=120)
-        self.cal_status_cb.pack(side="left", padx=10)
-        self.cal_open_entry = ctk.CTkEntry(edit_bar, width=62)
-        self.cal_open_entry.insert(0, "10:00")
-        self.cal_open_entry.pack(side="left", padx=4)
-        self.cal_close_entry = ctk.CTkEntry(edit_bar, width=62)
-        self.cal_close_entry.insert(0, "22:00")
-        self.cal_close_entry.pack(side="left", padx=4)
-        self.cal_notes_entry = ctk.CTkEntry(edit_bar, placeholder_text="Note", width=240)
-        self.cal_notes_entry.pack(side="left", padx=8)
-        ctk.CTkButton(edit_bar, text="Update Selected", command=self._apply_calendar_bulk_update).pack(side="right")
-
-        cols = ("Date", "Weekday", "Status", "Hours", "Orders", "Notes")
-        self.cal_tree = ttk.Treeview(cal_card, columns=cols, show="headings", selectmode="extended")
-        for c in cols:
-            self.cal_tree.heading(c, text=c)
-        self.cal_tree.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 14))
 
     def _append_import_log(self, line: str):
         box = getattr(self, "import_log_box", None)
@@ -1437,90 +1377,6 @@ class GastroAnalyticsApp(ctk.CTk):
             box.configure(state="disabled")
         except Exception:
             pass
-
-    def _one_click_import(self):
-        filepaths = filedialog.askopenfilenames(title="Import CSV", filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
-        if not filepaths:
-            return
-
-        self.configure(cursor="watch")
-        self.update_idletasks()
-        try:
-            importer = CSVImporter(auto_create_brands=brand_service.get_auto_create_brands_setting())
-            for path in filepaths:
-                try:
-                    res = importer.auto_import_file(path)
-                    self._append_import_log(f"{res['filename']}: Imported {res['inserted']} orders ({res['skipped']} duplicates skipped).")
-                except UnrecognizedCSVFormatError as unrec:
-                    self._append_import_log(f"{os.path.basename(path)}: Unrecognized format — opening mapper.")
-                    self._open_custom_mapper(unrec.filepath)
-        finally:
-            self.configure(cursor="")
-
-        self.invalidate_analytics_cache()
-        self.mark_tabs_dirty()
-        self._populate_global_dropdowns()
-        self.refresh_calendar_table()
-
-    def _open_custom_mapper(self, filepath):
-        CustomMapperDialog(self, theme_mode=self.theme_mode, initial_filepath=filepath, on_imported_callback=self._on_custom_import_done)
-
-    def _on_custom_import_done(self, res: dict):
-        self._append_import_log(f"{res['filename']}: Imported {res['inserted']} orders ({res['skipped']} duplicates skipped).")
-        self._populate_global_dropdowns()
-        self.refresh_calendar_table()
-
-    @safe_action
-    def refresh_calendar_table(self):
-        start_d, end_d = self.cal_start_entry.get().strip(), self.cal_end_entry.get().strip()
-        if not validate_date(start_d) or not validate_date(end_d) or start_d > end_d:
-            messagebox.showwarning("Invalid Date", "Check YYYY-MM-DD format and ensure Start <= End.")
-            return
-
-        self.cal_tree.delete(*self.cal_tree.get_children())
-        loc_id, brand_id = self._get_selected_ids(self.cal_location_cb.get(), self.cal_brand_cb.get(), False)
-        if not loc_id or not brand_id:
-            return
-
-        date_range = pd.date_range(start_d, end_d)
-        with contextlib.closing(get_connection()) as conn:
-            cal_rows = conn.execute("SELECT date, status, open_time, close_time, COALESCE(notes, '') as notes FROM operating_calendar WHERE location_id = ? AND brand_id = ? AND date BETWEEN ? AND ?", (loc_id, brand_id, start_d, end_d)).fetchall()
-            ord_rows = conn.execute("SELECT date(order_datetime) as d, COUNT(*) as cnt FROM orders WHERE location_id = ? AND brand_id = ? AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('rejected', 'cancelled', 'canceled', 'refunded', 'void', 'odrzucone', 'odrzucony', 'anulowane', 'anulowany', 'zwrocone') AND date(order_datetime) BETWEEN ? AND ? GROUP BY d", (loc_id, brand_id, start_d, end_d)).fetchall()
-
-        cal_map = {r['date']: dict(r) for r in cal_rows}
-        ord_map = {r['d']: r['cnt'] for r in ord_rows}
-        for dt in date_range:
-            d_str = dt.strftime("%Y-%m-%d")
-            info = cal_map.get(d_str, {"status": "Open", "open_time": "10:00", "close_time": "22:00", "notes": ""})
-            self.cal_tree.insert("", "end", iid=d_str, values=(d_str, dt.day_name(), info["status"], f"{info['open_time']}-{info['close_time']}", ord_map.get(d_str, 0), info["notes"]))
-
-    @safe_action
-    def _apply_calendar_bulk_update(self):
-        selected = self.cal_tree.selection()
-        if not selected:
-            return
-        loc_id, brand_id = self._get_selected_ids(self.cal_location_cb.get(), self.cal_brand_cb.get(), False)
-        status = self.cal_status_cb.get()
-        open_t = self.cal_open_entry.get().strip() or "10:00"
-        close_t = self.cal_close_entry.get().strip() or "22:00"
-        if not validate_hhmm(open_t) or not validate_hhmm(close_t):
-            messagebox.showwarning("Invalid Time", "Enter valid hours in HH:MM format (e.g. 10:00 and 22:00).")
-            return
-        notes = self.cal_notes_entry.get().strip()
-
-        with contextlib.closing(get_connection()) as conn:
-            cur = conn.cursor()
-            for d_str in selected:
-                cur.execute("""
-                    INSERT INTO operating_calendar (location_id, brand_id, date, status, open_time, close_time, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(location_id, brand_id, date) DO UPDATE SET
-                        status = excluded.status, open_time = excluded.open_time, close_time = excluded.close_time, notes = excluded.notes
-                """, (loc_id, brand_id, d_str, status, open_t, close_t, notes))
-            conn.commit()
-        self.invalidate_analytics_cache()
-        self.mark_tabs_dirty()
-        self.refresh_calendar_table()
 
     # =========================================================================
     # SETTINGS TAB (ZERO-MAINTENANCE & LAYMAN-FRIENDLY)
@@ -1611,7 +1467,6 @@ class GastroAnalyticsApp(ctk.CTk):
         self.invalidate_analytics_cache()
         self.mark_tabs_dirty()
         self._populate_global_dropdowns()
-        self.refresh_calendar_table()
         self.refresh_finances_tab(force=True)
 
         messagebox.showinfo(
@@ -1722,9 +1577,28 @@ class GastroAnalyticsApp(ctk.CTk):
             command=self._remove_selected_alias,
         ).pack(side="left", padx=6)
 
+        # Row 3b: Merge Two Restaurants Into One (e.g. Wolt + Bolt same venue)
+        merge_row = ctk.CTkFrame(alias_card, fg_color=t["card"], corner_radius=6)
+        merge_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(merge_row, text="Merge Restaurant:", font=self.font_bold).pack(side="left", padx=(10, 4), pady=6)
+        self.merge_source_cb = ctk.CTkComboBox(merge_row, width=210)
+        self.merge_source_cb.pack(side="left", padx=4, pady=6)
+
+        ctk.CTkLabel(merge_row, text="Into Target:", font=self.font_bold).pack(side="left", padx=(8, 4), pady=6)
+        self.merge_target_cb = ctk.CTkComboBox(merge_row, width=210)
+        self.merge_target_cb.pack(side="left", padx=4, pady=6)
+
+        ctk.CTkButton(
+            merge_row,
+            text="Merge & Save Alias",
+            width=145,
+            command=self._merge_selected_restaurants,
+        ).pack(side="right", padx=(4, 10), pady=6)
+
         # Row 4: Per-Restaurant Settings (Name, Location link, Active/Inactive status)
         brand_cfg_row = ctk.CTkFrame(alias_card, fg_color=t["card"], corner_radius=6)
-        brand_cfg_row.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
+        brand_cfg_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         ctk.CTkLabel(brand_cfg_row, text="Restaurant Settings:", font=self.font_bold).pack(side="left", padx=(10, 6), pady=6)
         self.edit_brand_id_var = tk.StringVar(value="")
@@ -1790,6 +1664,33 @@ class GastroAnalyticsApp(ctk.CTk):
                     fn(force=True)
                 except TypeError:
                     fn()
+
+    @safe_action
+    def _merge_selected_restaurants(self):
+        src_label = self.merge_source_cb.get().strip() if hasattr(self, "merge_source_cb") else ""
+        tgt_label = self.merge_target_cb.get().strip() if hasattr(self, "merge_target_cb") else ""
+        src_id = getattr(self, "brand_merge_map", {}).get(src_label)
+        tgt_id = getattr(self, "brand_merge_map", {}).get(tgt_label)
+        if not src_id or not tgt_id:
+            messagebox.showwarning("Missing Selection", "Choose both source and target restaurants.")
+            return
+        if int(src_id) == int(tgt_id):
+            messagebox.showwarning("Same Restaurant", "Choose two different restaurants to merge.")
+            return
+        if not messagebox.askyesno(
+            "Confirm Merge",
+            f"Merge '{src_label}' INTO '{tgt_label}'?\n\n"
+            "All orders, items, payout reports and costs will move to the target restaurant, "
+            "the source name will be saved as an alias for automatic future imports, and the duplicate entry will be removed.",
+        ):
+            return
+        res = brand_service.merge_restaurants_into_target(int(src_id), int(tgt_id))
+        self._refresh_after_brand_change()
+        messagebox.showinfo(
+            "Merged",
+            f"Merged '{res['source_name']}' into '{res['target_name']}' "
+            f"(moved orders: {res['moved_orders']}, saved aliases: {res['saved_aliases']}).",
+        )
 
     def _on_brand_tree_select(self, _event=None):
         sel = self.brands_tree.selection()
@@ -2300,6 +2201,18 @@ class GastroAnalyticsApp(ctk.CTk):
                     else:
                         cb_widget.set("")
 
+            if hasattr(self, 'merge_source_cb') and hasattr(self, 'merge_target_cb'):
+                self.merge_source_cb.configure(values=main_labels if main_labels else [""])
+                self.merge_target_cb.configure(values=main_labels if main_labels else [""])
+                if len(main_labels) >= 2:
+                    if self.merge_source_cb.get() not in main_labels:
+                        self.merge_source_cb.set(main_labels[0])
+                    if self.merge_target_cb.get() not in main_labels or self.merge_target_cb.get() == self.merge_source_cb.get():
+                        self.merge_target_cb.set(main_labels[1])
+                elif main_labels:
+                    self.merge_source_cb.set(main_labels[0])
+                    self.merge_target_cb.set(main_labels[0])
+
             if hasattr(self, 'combine_dup_cb'):
                 self.combine_dup_cb.configure(values=dup_labels if dup_labels else [""])
                 if dup_labels:
@@ -2374,18 +2287,14 @@ class GastroAnalyticsApp(ctk.CTk):
 
         self.dash_location_cb.configure(values=multi_loc_names)
         self.daily_location_cb.configure(values=multi_loc_names)
-        self.cal_location_cb.configure(values=single_loc_names)
 
         if self.dash_location_cb.get() not in multi_loc_names:
             self.dash_location_cb.set(multi_loc_names[0])
         if self.daily_location_cb.get() not in multi_loc_names:
             self.daily_location_cb.set(multi_loc_names[0])
-        if self.cal_location_cb.get() not in single_loc_names:
-            self.cal_location_cb.set(single_loc_names[0])
 
         self._on_dash_location_change(self.dash_location_cb.get())
         self._on_daily_location_change(self.daily_location_cb.get())
-        self._on_cal_location_change(self.cal_location_cb.get())
 
     def _get_brands_for_location(self, loc_name: str):
         with contextlib.closing(get_connection()) as conn:
@@ -2426,142 +2335,320 @@ class GastroAnalyticsApp(ctk.CTk):
         elif vals:
             self.dash_brand_cb.set(vals[0])
 
-    def _on_cal_location_change(self, loc_name: str):
         brands = self._get_brands_for_location(loc_name)
         vals = [b['name'] for b in brands] if brands else ["No Active Brands"]
-        self.cal_brand_cb.configure(values=vals)
-        self.cal_brand_cb.set(vals[0])
 
 
     def _build_finances_tab(self):
+        t = self._t()
         parent = self.frames["finances"]
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=1)
+        parent.grid_rowconfigure(3, weight=1)
 
-        top_bar = ctk.CTkFrame(parent)
-        top_bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        # Karta filtrów na górze
+        filter_card = ctk.CTkFrame(parent, fg_color=t["card"], corner_radius=8)
+        filter_card.grid(row=0, column=0, padx=6, pady=(6, 10), sticky="ew")
 
-        ctk.CTkLabel(top_bar, text="From (YYYY-MM-DD):").pack(side="left", padx=(10, 4), pady=8)
-        self.fin_date_from = ctk.CTkEntry(top_bar, width=110)
-        self.fin_date_from.pack(side="left", padx=(0, 10), pady=8)
+        ctk.CTkLabel(filter_card, text="From:", font=self.font_small, text_color=t["muted"]).pack(
+            side="left", padx=(12, 4), pady=10
+        )
+        self.fin_date_from = ctk.CTkEntry(filter_card, width=105)
+        self.fin_date_from.pack(side="left", padx=(0, 8), pady=10)
 
-        ctk.CTkLabel(top_bar, text="To:").pack(side="left", padx=(0, 4), pady=8)
-        self.fin_date_to = ctk.CTkEntry(top_bar, width=110)
-        self.fin_date_to.pack(side="left", padx=(0, 10), pady=8)
+        ctk.CTkLabel(filter_card, text="To:", font=self.font_small, text_color=t["muted"]).pack(
+            side="left", padx=(0, 4), pady=10
+        )
+        self.fin_date_to = ctk.CTkEntry(filter_card, width=105)
+        self.fin_date_to.pack(side="left", padx=(0, 10), pady=10)
 
-        ctk.CTkLabel(top_bar, text="Platform:").pack(side="left", padx=(0, 4), pady=8)
+        ctk.CTkLabel(filter_card, text="Platform:", font=self.font_small, text_color=t["muted"]).pack(
+            side="left", padx=(0, 4), pady=10
+        )
         self.fin_platform_var = ctk.StringVar(value="All")
         self.fin_platform_menu = ctk.CTkOptionMenu(
-            top_bar,
+            filter_card,
             values=["All", "Bolt Food", "Wolt"],
             variable=self.fin_platform_var,
-            width=120,
-            command=lambda _v: self.refresh_finances_tab(),
+            width=115,
+            command=lambda _v: self.refresh_finances_tab(force=True),
         )
-        self.fin_platform_menu.pack(side="left", padx=(0, 10), pady=8)
+        self.fin_platform_menu.pack(side="left", padx=(0, 10), pady=10)
 
-        ctk.CTkButton(top_bar, text="Apply", width=80, command=self.refresh_finances_tab).pack(
-            side="left", padx=(0, 8), pady=8
+        ctk.CTkLabel(filter_card, text="Location:", font=self.font_small, text_color=t["muted"]).pack(
+            side="left", padx=(0, 4), pady=10
         )
+        self.fin_location_var = ctk.StringVar(value="All")
+        self.fin_location_menu = ctk.CTkOptionMenu(
+            filter_card,
+            values=["All"],
+            variable=self.fin_location_var,
+            width=130,
+            command=self._on_fin_location_changed,
+        )
+        self.fin_location_menu.pack(side="left", padx=(0, 10), pady=10)
 
+        ctk.CTkLabel(filter_card, text="Restaurant:", font=self.font_small, text_color=t["muted"]).pack(
+            side="left", padx=(0, 4), pady=10
+        )
+        self.fin_brand_var = ctk.StringVar(value="All")
+        self.fin_brand_menu = ctk.CTkOptionMenu(
+            filter_card,
+            values=["All"],
+            variable=self.fin_brand_var,
+            width=175,
+            command=lambda _v: self.refresh_finances_tab(force=True),
+        )
+        self.fin_brand_menu.pack(side="left", padx=(0, 10), pady=10)
 
-        cards_frame = ctk.CTkFrame(parent)
-        cards_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+        ctk.CTkButton(
+            filter_card,
+            text="Apply",
+            width=80,
+            command=lambda: self.refresh_finances_tab(force=True),
+        ).pack(side="left", padx=(0, 6), pady=10)
+
+        ctk.CTkButton(
+            filter_card,
+            text="Reset",
+            width=75,
+            fg_color="transparent",
+            border_width=1,
+            border_color=t["ghost_border"],
+            text_color=t["text"],
+            command=self._reset_finances_filters,
+        ).pack(side="left", padx=(0, 12), pady=10)
+
+        ctk.CTkButton(
+            filter_card,
+            text="Export .xlsx / .csv",
+            height=30,
+            fg_color="transparent",
+            hover_color=t["ghost_hover"],
+            border_width=1,
+            border_color=t["ghost_border"],
+            text_color=t["text"],
+            command=self._export_finances_file,
+        ).pack(side="right", padx=12, pady=10)
+
+        # Wiersz 1: Główne kafelki metryk (dokładny styl KPI)
+        cards_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        cards_frame.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         for c in range(3):
-            cards_frame.grid_columnconfigure(c, weight=1)
+            cards_frame.grid_columnconfigure(c, weight=1, uniform="fin_cards_top")
 
         self.fin_cards = {}
-        card_specs = [
+        top_card_specs = [
             ("gross_sales", "Gross Sales (incl. VAT)"),
-            ("service_fees", "Service Fees & Commissions"),
-            ("total_losses", "Total Costs & Losses"),
+            ("service_fees", "Commissions & Fees (incl. VAT)"),
+            ("total_losses", "Total Costs = Fees + Ads + Disc./Ded."),
         ]
-        for idx, (key, title) in enumerate(card_specs):
-            box = ctk.CTkFrame(cards_frame)
-            box.grid(row=0, column=idx, sticky="nsew", padx=6, pady=8)
-            ctk.CTkLabel(box, text=title, font=ctk.CTkFont(size=12, weight="bold")).pack(
-                anchor="w", padx=10, pady=(8, 2)
-            )
-            val_lbl = ctk.CTkLabel(box, text="0.00 EUR", font=ctk.CTkFont(size=18, weight="bold"))
-            val_lbl.pack(anchor="w", padx=10, pady=(0, 2))
-            sub_lbl = ctk.CTkLabel(box, text="0.00% of sales", font=ctk.CTkFont(size=11))
-            sub_lbl.pack(anchor="w", padx=10, pady=(0, 8))
-            self.fin_cards[key] = (val_lbl, sub_lbl)
+        for idx, (key, title) in enumerate(top_card_specs):
+            card = ctk.CTkFrame(cards_frame, fg_color=t["card"], corner_radius=8)
+            card.grid(row=0, column=idx, padx=6, pady=6, sticky="nsew")
+            lbl_title = ctk.CTkLabel(card, text=title, font=self.font_small, text_color=t["muted"])
+            lbl_title.pack(anchor="w", padx=12, pady=(10, 0))
+            lbl_main = ctk.CTkLabel(card, text="0.00 EUR", font=self.font_kpi, text_color=t["text"])
+            lbl_sub = ctk.CTkLabel(card, text="0.00% of sales", font=self.font_small, text_color=t["muted"])
+            lbl_main.pack(anchor="w", padx=12, pady=(0, 0))
+            lbl_sub.pack(anchor="w", padx=12, pady=(0, 10))
+            self.fin_cards[key] = (lbl_main, lbl_sub)
 
-        table_frame = ctk.CTkFrame(parent)
-        table_frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
-        table_frame.grid_columnconfigure(0, weight=1)
-        table_frame.grid_rowconfigure(0, weight=1)
+        # Wiersz 2: Czytelne kafelki sum (Ads, Discounts/Refunds, Net Payout)
+        totals_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        totals_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        for c in range(3):
+            totals_frame.grid_columnconfigure(c, weight=1, uniform="fin_cards_bottom")
+
+        bottom_card_specs = [
+            ("ads_total", "Total Ads & Promos"),
+            ("other_total", "Total Discounts & Refunds"),
+            ("payout_total", "Total Platform Payout"),
+        ]
+        for idx, (key, title) in enumerate(bottom_card_specs):
+            card = ctk.CTkFrame(totals_frame, fg_color=t["card"], corner_radius=8)
+            card.grid(row=0, column=idx, padx=6, pady=4, sticky="nsew")
+            lbl_title = ctk.CTkLabel(card, text=title, font=self.font_small, text_color=t["muted"])
+            lbl_title.pack(anchor="w", padx=12, pady=(10, 0))
+            lbl_main = ctk.CTkLabel(card, text="0.00 EUR", font=self.font_kpi, text_color=t["text"])
+            lbl_sub = ctk.CTkLabel(card, text="0.00% of sales", font=self.font_small, text_color=t["muted"])
+            lbl_main.pack(anchor="w", padx=12, pady=(0, 0))
+            lbl_sub.pack(anchor="w", padx=12, pady=(0, 10))
+            self.fin_cards[key] = (lbl_main, lbl_sub)
+
+        # Karta tabeli o tym samym kształcie co pozostałe karty
+        table_card = ctk.CTkFrame(parent, fg_color=t["card"], corner_radius=8)
+        table_card.grid(row=3, column=0, padx=6, pady=(0, 12), sticky="nsew")
+        table_card.grid_columnconfigure(0, weight=1)
+        table_card.grid_rowconfigure(0, weight=1)
 
         cols = ("brand", "platform", "reports", "sales", "ads", "comm_fees", "other", "losses", "share", "payout")
-        self.fin_tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
+        self.fin_tree = ttk.Treeview(table_card, columns=cols, show="headings", height=11)
         headings = {
-            "brand": "Brand",
+            "brand": "Restaurant",
             "platform": "Platform",
-            "reports": "Reports",
-            "sales": "Gross Sales",
-            "ads": "Ads Loss",
-            "comm_fees": "Fees & Comm.",
-            "other": "Other Costs",
-            "losses": "Total Losses",
-            "share": "Loss %",
-            "payout": "Payout",
+            "reports": "Docs",
+            "sales": "Gross Sales (incl. VAT)",
+            "ads": "Ads & Promos",
+            "comm_fees": "Commissions & Fees",
+            "other": "Discounts & Refunds",
+            "losses": "Total Costs (All)",
+            "share": "Costs % of Sales",
+            "payout": "Platform Payout",
         }
-        for col, text in headings.items():
-            self.fin_tree.heading(col, text=text)
-            self.fin_tree.column(col, width=105, anchor="e" if col not in ("brand", "platform") else "w")
+        widths = {
+            "brand": 185,
+            "platform": 95,
+            "reports": 60,
+            "sales": 135,
+            "ads": 105,
+            "comm_fees": 135,
+            "other": 135,
+            "losses": 115,
+            "share": 105,
+            "payout": 125,
+        }
+        for c in cols:
+            self.fin_tree.heading(c, text=headings[c], anchor="center")
+            self.fin_tree.column(c, width=widths[c], anchor="center")
 
-        self.fin_tree.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.fin_tree.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
 
-    @safe_action
-    def _import_payout_folder_recursive(self):
-        folder = filedialog.askdirectory(title="Select folder with Bolt Food / Wolt payout reports")
-        if not folder:
+    def _export_finances_file(self):
+        if not hasattr(self, "fin_tree"):
             return
-        res = import_payouts_recursive(
-            folder,
-            auto_create_brands=brand_service.get_auto_create_brands_setting(),
-            create_backup=True,
-        )
-        self.refresh_finances_tab()
-        messagebox.showinfo(
-            "Payout Import Summary",
-            f"Found: {res['found']}\nImported: {res['imported']}\n"
-            f"Duplicates skipped: {res['skipped_duplicates']}\n"
-            f"Warnings: {res['warnings_count']}\nErrors: {res['errors_count']}",
-        )
-
-    @safe_action
-    def _import_day_folder_all(self):
-        folder = filedialog.askdirectory(title="Select day folder with sales/orders and payout reports")
-        if not folder:
+        rows = [self.fin_tree.item(iid, "values") for iid in self.fin_tree.get_children()]
+        if not rows:
+            messagebox.showwarning("No Data", "There is no losses and payouts data to export.")
             return
-        res = import_day_folder_recursive(
-            folder, auto_create_brands=brand_service.get_auto_create_brands_setting()
+
+        headers = [
+            "Restaurant",
+            "Platform",
+            "Docs",
+            "Gross Sales (incl. VAT)",
+            "Ads & Promos",
+            "Commissions & Fees",
+            "Discounts & Refunds",
+            "Total Costs (All)",
+            "Costs % of Sales",
+            "Platform Payout",
+        ]
+        df_export = pd.DataFrame(rows, columns=headers)
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("CSV File", "*.csv")],
+            initialfile=f"Losses_Payouts_{datetime.now().strftime('%Y%m%d')}.xlsx",
         )
-        p_res = res.get("payouts", {}) if isinstance(res, dict) else {}
-        o_res = res.get("orders", {}) if isinstance(res, dict) else {}
-        p_errs = p_res.get("errors", []) or []
-        o_errs = o_res.get("errors", []) or []
-        self.refresh_finances_tab()
-        messagebox.showinfo(
-            "Day Folder Import Summary",
-            f"Folder: {res.get('folder', folder)}\n"
-            f"Payouts/Invoices imported: {p_res.get('imported', 0)} "
-            f"(duplicates: {p_res.get('skipped_duplicates', p_res.get('duplicates', 0))})\n"
-            f"Orders/Sales files imported: {o_res.get('imported', 0)} "
-            f"(duplicates: {o_res.get('duplicates', 0)})\n"
-            f"Errors: {len(p_errs) + len(o_errs)}",
-        )
+        if not path:
+            return
+
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            if path.lower().endswith(".csv"):
+                df_export.to_csv(path, index=False, encoding="utf-8-sig")
+            else:
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    df_export.to_excel(writer, sheet_name="Losses & Payouts", index=False)
+            messagebox.showinfo("Export Complete", f"Losses & payouts report saved to:\n{path}")
+        finally:
+            self.configure(cursor="")
+
+    def _sync_finances_filter_options(self):
+        if not hasattr(self, "fin_location_menu") or not hasattr(self, "fin_brand_menu"):
+            return
+
+        locs = []
+        try:
+            conn = get_connection()
+            try:
+                rows = conn.execute("SELECT id, name FROM locations ORDER BY name COLLATE NOCASE").fetchall()
+                for r in rows:
+                    locs.append({"id": int(r["id"]), "name": str(r["name"])})
+            finally:
+                conn.close()
+        except Exception:
+            locs = []
+
+        brands = []
+        try:
+            conn = get_connection()
+            try:
+                rows = conn.execute("SELECT id, name, location_id FROM brands ORDER BY name COLLATE NOCASE").fetchall()
+                for r in rows:
+                    brands.append({
+                        "id": int(r["id"]),
+                        "name": str(r["name"]),
+                        "location_id": r["location_id"],
+                    })
+            finally:
+                conn.close()
+        except Exception:
+            brands = []
+
+        self._fin_loc_map = {"All": None}
+        loc_names = ["All"]
+        for loc in locs:
+            nm = str(loc.get("name") or "").strip()
+            if nm and nm not in self._fin_loc_map:
+                self._fin_loc_map[nm] = int(loc["id"])
+                loc_names.append(nm)
+
+        cur_loc = self.fin_location_var.get() if hasattr(self, "fin_location_var") else "All"
+        if cur_loc not in self._fin_loc_map:
+            cur_loc = "All"
+            self.fin_location_var.set("All")
+        self.fin_location_menu.configure(values=loc_names)
+        self.fin_location_var.set(cur_loc)
+
+        sel_loc_id = self._fin_loc_map.get(cur_loc)
+        self._fin_brand_map = {"All": None}
+        brand_names = ["All"]
+        for br in brands:
+            b_loc = br.get("location_id")
+            if sel_loc_id is not None and (b_loc is None or int(b_loc) != int(sel_loc_id)):
+                continue
+            bname = str(br.get("name") or "").strip()
+            if bname and bname not in self._fin_brand_map:
+                self._fin_brand_map[bname] = int(br["id"])
+                brand_names.append(bname)
+
+        cur_brand = self.fin_brand_var.get() if hasattr(self, "fin_brand_var") else "All"
+        if cur_brand not in self._fin_brand_map:
+            cur_brand = "All"
+            self.fin_brand_var.set("All")
+        self.fin_brand_menu.configure(values=brand_names)
+        self.fin_brand_var.set(cur_brand)
+
+    def _on_fin_location_changed(self, _val=None):
+        if hasattr(self, "fin_brand_var"):
+            self.fin_brand_var.set("All")
+        self._sync_finances_filter_options()
+        self.refresh_finances_tab(force=True)
+
+    def _reset_finances_filters(self):
+        self.fin_date_from.delete(0, "end")
+        self.fin_date_to.delete(0, "end")
+        self.fin_platform_var.set("All")
+        self.fin_location_var.set("All")
+        self.fin_brand_var.set("All")
+        self._sync_finances_filter_options()
+        self.refresh_finances_tab(force=True)
 
     @safe_action
     def refresh_finances_tab(self, force: bool = False):
         if not hasattr(self, "fin_cards"):
             return
+        self._sync_finances_filter_options()
         d_from = self.fin_date_from.get().strip() or None
         d_to = self.fin_date_to.get().strip() or None
         plat = self.fin_platform_var.get()
-        fin_key = (d_from, d_to, plat, self.theme_mode)
+        loc_name = self.fin_location_var.get() if hasattr(self, "fin_location_var") else "All"
+        brand_name = self.fin_brand_var.get() if hasattr(self, "fin_brand_var") else "All"
+        brand_id = getattr(self, "_fin_brand_map", {}).get(brand_name)
+
+        fin_key = (d_from, d_to, plat, loc_name, brand_name, self.theme_mode)
         if (
             not force
             and getattr(self, "_last_finances_key", None) == fin_key
@@ -2570,47 +2657,127 @@ class GastroAnalyticsApp(ctk.CTk):
         ):
             return
 
-        summary = get_loss_summary(date_from=d_from, date_to=d_to, platform=plat)
-        sales = summary["gross_sales_total"]
-
-        self.fin_cards["gross_sales"][0].configure(text=f"{sales:,.2f} EUR")
-        self.fin_cards["gross_sales"][1].configure(text=f"Reports: {summary['reports_count']}")
-
-        self.fin_cards["service_fees"][0].configure(text=f"{summary['service_fees_loss_gross']:,.2f} EUR")
-        self.fin_cards["service_fees"][1].configure(text=f"{summary['service_fees_loss_pct']:.2f}% of sales")
-
-        self.fin_cards["total_losses"][0].configure(text=f"{summary['total_losses_gross']:,.2f} EUR")
-        self.fin_cards["total_losses"][1].configure(text=f"{summary['total_loss_pct']:.2f}% of sales")
-
         existing_rows = self.fin_tree.get_children()
         if existing_rows:
             self.fin_tree.delete(*existing_rows)
         self._last_finances_key = fin_key
 
-        df = get_payout_breakdown_by_brand_and_platform(date_from=d_from, date_to=d_to, platform=plat)
+        df = get_payout_breakdown_by_brand_and_platform(
+            date_from=d_from,
+            date_to=d_to,
+            brand_id=brand_id,
+            platform=plat,
+        )
+        allowed_brands = None
+        if brand_id is None and loc_name != "All":
+            sel_loc_id = getattr(self, "_fin_loc_map", {}).get(loc_name)
+            if sel_loc_id is not None:
+                conn = get_connection()
+                try:
+                    rows = conn.execute(
+                        "SELECT id FROM brands WHERE location_id = ?",
+                        (int(sel_loc_id),),
+                    ).fetchall()
+                    allowed_brands = {int(r["id"]) for r in rows}
+                finally:
+                    conn.close()
+
+        tot_docs = 0
+        tot_sales = 0.0
+        tot_ads = 0.0
+        tot_comm = 0.0
+        tot_other = 0.0
+        tot_costs = 0.0
+        tot_payout = 0.0
+
         for _, r in df.iterrows():
+            if allowed_brands is not None and int(r["brand_id"]) not in allowed_brands:
+                continue
+            docs_cnt = int(r["reports_count"] or 0)
+            row_sales = float(r["gross_sales_total"] or 0.0)
+            row_ads = float(r["ads_campaigns_gross"] or 0.0)
+            row_comm = float(r["commissions_fees_gross"] or 0.0)
             other_c = round(
-                float(r["merchant_discounts_gross"])
-                + float(r["deductions_refunds_gross"])
-                + float(r["other_adjustments_gross"]),
+                float(r["merchant_discounts_gross"] or 0.0)
+                + float(r["deductions_refunds_gross"] or 0.0)
+                + float(r["other_adjustments_gross"] or 0.0),
                 2,
             )
+            row_costs = round(row_comm + row_ads + other_c, 2)
+            row_payout = float(r["payout_amount_gross"] or 0.0)
+            row_pct = round((row_costs / row_sales) * 100.0, 2) if row_sales > 0 else 0.0
+
+            tot_docs += docs_cnt
+            tot_sales += row_sales
+            tot_ads += row_ads
+            tot_comm += row_comm
+            tot_other += other_c
+            tot_costs += row_costs
+            tot_payout += row_payout
+
             self.fin_tree.insert(
                 "",
                 "end",
                 values=(
                     r["brand_name"],
                     r["platform"],
-                    int(r["reports_count"]),
-                    f"{float(r['gross_sales_total']):,.2f}",
-                    f"{float(r['ads_campaigns_gross']):,.2f}",
-                    f"{float(r['commissions_fees_gross']):,.2f}",
+                    docs_cnt,
+                    f"{row_sales:,.2f}",
+                    f"{row_ads:,.2f}",
+                    f"{row_comm:,.2f}",
                     f"{other_c:,.2f}",
-                    f"{float(r['total_costs_gross']):,.2f}",
-                    f"{float(r['cost_share_pct']):.2f}%",
-                    f"{float(r['payout_amount_gross']):,.2f}",
+                    f"{row_costs:,.2f}",
+                    f"{row_pct:.2f}%",
+                    f"{row_payout:,.2f}",
                 ),
             )
+
+        tot_sales = round(tot_sales, 2)
+        tot_ads = round(tot_ads, 2)
+        tot_comm = round(tot_comm, 2)
+        tot_other = round(tot_other, 2)
+        tot_costs = round(tot_costs, 2)
+        tot_payout = round(tot_payout, 2)
+
+        if "ads_total" in self.fin_cards:
+            ads_pct = (tot_ads / tot_sales) * 100.0 if tot_sales > 0 else 0.0
+            v_lbl, s_lbl = self.fin_cards["ads_total"]
+            v_lbl.configure(text=f"{tot_ads:,.2f} EUR")
+            s_lbl.configure(text=f"{ads_pct:.2f}% of sales")
+
+        if "other_total" in self.fin_cards:
+            oth_pct = (tot_other / tot_sales) * 100.0 if tot_sales > 0 else 0.0
+            v_lbl, s_lbl = self.fin_cards["other_total"]
+            v_lbl.configure(text=f"{tot_other:,.2f} EUR")
+            s_lbl.configure(text=f"{oth_pct:.2f}% of sales")
+
+        if "payout_total" in self.fin_cards:
+            pay_pct = (tot_payout / tot_sales) * 100.0 if tot_sales > 0 else 0.0
+            v_lbl, s_lbl = self.fin_cards["payout_total"]
+            v_lbl.configure(text=f"{tot_payout:,.2f} EUR")
+            s_lbl.configure(text=f"{pay_pct:.2f}% of sales ({tot_docs} docs)")
+        tot_ads = round(tot_ads, 2)
+        tot_comm = round(tot_comm, 2)
+        tot_other = round(tot_other, 2)
+        tot_costs = round(tot_costs, 2)
+        tot_payout = round(tot_payout, 2)
+
+        comm_pct = round((tot_comm / tot_sales) * 100.0, 2) if tot_sales > 0 else 0.0
+        total_pct = round((tot_costs / tot_sales) * 100.0, 2) if tot_sales > 0 else 0.0
+
+        self.fin_cards["gross_sales"][0].configure(text=f"{tot_sales:,.2f} EUR")
+        self.fin_cards["gross_sales"][1].configure(text=f"Docs: {tot_docs}")
+
+        self.fin_cards["service_fees"][0].configure(text=f"{tot_comm:,.2f} EUR")
+        self.fin_cards["service_fees"][1].configure(text=f"{comm_pct:.2f}% of gross sales")
+
+        self.fin_cards["total_losses"][0].configure(text=f"{tot_costs:,.2f} EUR")
+        self.fin_cards["total_losses"][1].configure(
+            text=(
+                f"{total_pct:.2f}% of sales | Platform Payout: {tot_payout:,.2f} EUR "
+                f"(Ads: {tot_ads:,.2f}, Disc./Ref.: {tot_other:,.2f})"
+            )
+        )
 
     def _get_selected_ids(self, loc_name: str, brand_name: str, allow_all_brands: bool = True):
         if loc_name == "All Locations (All Active)":

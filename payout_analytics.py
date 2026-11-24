@@ -118,21 +118,13 @@ def _build_dedup_periods_cte(where_sql: str) -> str:
             CASE WHEN settlement_docs_count > 0 THEN disc_settlement ELSE disc_all END AS disc_period,
             CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END AS ref_period,
             CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END AS other_period,
-            CASE
-                WHEN LOWER(COALESCE(platform, '')) = 'wolt' THEN (
-                    COALESCE(CASE WHEN settlement_docs_count > 0 THEN comm_settlement ELSE comm_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ads_settlement ELSE ads_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END, 0.0)
-                )
-                ELSE (
-                    COALESCE(CASE WHEN settlement_docs_count > 0 THEN comm_settlement ELSE comm_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ads_settlement ELSE ads_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN disc_settlement ELSE disc_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END, 0.0)
-                    + COALESCE(CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END, 0.0)
-                )
-            END AS costs_period,
+            (
+                COALESCE(CASE WHEN settlement_docs_count > 0 THEN comm_settlement ELSE comm_all END, 0.0)
+                + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ads_settlement ELSE ads_all END, 0.0)
+                + COALESCE(CASE WHEN settlement_docs_count > 0 THEN disc_settlement ELSE disc_all END, 0.0)
+                + COALESCE(CASE WHEN settlement_docs_count > 0 THEN ref_settlement ELSE ref_all END, 0.0)
+                + COALESCE(CASE WHEN settlement_docs_count > 0 THEN other_settlement ELSE other_all END, 0.0)
+            ) AS costs_period,
             payout_period
         FROM period_agg
     )
@@ -432,18 +424,16 @@ def get_loss_summary(
         brand_id=brand_id,
         platform=platform,
     )
-    ord_sales = _orders_sales_for_scope(
-        date_from=date_from,
-        date_to=date_to,
-        brand_id=brand_id,
-        platform=platform,
-    )
-    ov_sales = float(ov["gross_sales_total"] or 0.0)
-    gross_sales = ov_sales if ov_sales > 0 else float(ord_sales or 0.0)
+    gross_sales = float(ov["gross_sales_total"] or 0.0)
     ads = float(ov["ads_campaigns_gross"] or 0.0)
     service_and_comm = float(ov["commissions_fees_gross"] or 0.0)
-    total_losses = float(ov["total_costs_gross"] or 0.0)
-    other_losses = round(max(0.0, total_losses - ads - service_and_comm), 2)
+    other_losses = round(
+        float(ov["merchant_discounts_gross"] or 0.0)
+        + float(ov["deductions_refunds_gross"] or 0.0)
+        + float(ov["other_adjustments_gross"] or 0.0),
+        2,
+    )
+    total_losses = round(service_and_comm + ads + other_losses, 2)
 
     def pct(val: float) -> float:
         return round((val / gross_sales) * 100.0, 2) if gross_sales > 0 else 0.0
@@ -457,7 +447,7 @@ def get_loss_summary(
         "service_fees_loss_pct": pct(service_and_comm),
         "other_losses_gross": other_losses,
         "other_losses_pct": pct(other_losses),
-        "total_losses_gross": round(total_losses, 2),
+        "total_losses_gross": total_losses,
         "total_loss_pct": pct(total_losses),
         "payout_amount_gross": round(float(ov["payout_amount_gross"] or 0.0), 2),
     }

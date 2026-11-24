@@ -8,6 +8,7 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -24,6 +25,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m pip install pyinstaller
+
+      - name: Syntax check
+        run: |
+          python -m py_compile main.py database.py analytics.py payout_analytics.py importer.py payout_parser.py brand_service.py
 
       - name: Build Windows executable
         shell: pwsh
@@ -51,6 +56,7 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -67,6 +73,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m pip install pyinstaller
+
+      - name: Syntax check
+        run: |
+          python3 -m py_compile main.py database.py analytics.py payout_analytics.py importer.py payout_parser.py brand_service.py
 
       - name: Build macOS binary
         shell: bash
@@ -86,10 +96,15 @@ jobs:
             --collect-all matplotlib \
             main.py
 
-      - name: Zip macOS binary
+      - name: Package macOS artifact
         shell: bash
         run: |
-          zip -j dist/GastroAnalytics-macOS-ARM.zip dist/GastroAnalytics
+          ls -la dist
+          if [ -d "dist/GastroAnalytics.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/GastroAnalytics.app dist/GastroAnalytics-macOS-ARM.zip
+          else
+            zip -j dist/GastroAnalytics-macOS-ARM.zip dist/GastroAnalytics
+          fi
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

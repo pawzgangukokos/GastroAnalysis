@@ -159,117 +159,124 @@ class UserGuideDialog(ctk.CTkToplevel):
     def __init__(self, parent, theme_mode: str):
         super().__init__(parent)
         self.title("GastroAnalytics — User Guide")
-        self.geometry("780x620")
+        self.geometry("840x660")
         self.transient(parent)
-        self.configure(fg_color=PALETTE[theme_mode]["canvas"])
+        t = PALETTE[theme_mode]
+        self.configure(fg_color=t["canvas"])
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        ctk.CTkLabel(
+            self,
+            text="GastroAnalytics — User Guide",
+            font=ctk.CTkFont(family=DISPLAY_FONT, size=20, weight="bold"),
+            text_color=t["text"],
+        ).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 8))
 
-        guide_text = """
-1. WHAT THIS APP DOES (SIMPLE OVERVIEW)
-GastroAnalytics helps you understand how your kitchen and delivery channels perform:
-- Orders & Kitchen Data: Shows completed orders, food items, revenue, ratings, busy hours, top dishes, and daily tables from delivery platforms (such as Bolt, Wolt, or POS exports).
-- Payouts & Costs: Reads payout and invoice documents (PDF/CSV) so you can see gross sales, platform commissions, ads, discounts, refunds/deductions, net payout, and real cost share.
-- Safety First: Importing the same file twice skips duplicates, and you can create or restore backups anytime.
+        scroll = ctk.CTkScrollableFrame(self, fg_color=t["card"], corner_radius=8)
+        scroll.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 12))
+        scroll.grid_columnconfigure(0, weight=1)
 
-2. STEP-BY-STEP WORKFLOW (FOR EVERYDAY USE)
-Step A — Import Order Files:
-1. Export order CSV files from Bolt, Wolt, or your POS/export folder.
-2. Open "Settings & Import" -> "Import CSV" (or folder import).
-3. Duplicate orders are skipped automatically. Cancelled, rejected, refunded, or void orders do not count as completed sales.
+        guide_text = """1. WHAT THIS APP DOES (OVERVIEW)
+GastroAnalytics helps multi-brand kitchens and delivery operations track order volume, kitchen workload, and platform payout costs in one place:
+- Dashboard: KPI cards (revenue, AOV, orders, food items, rejected orders/lost revenue, top dishes, busiest/quietest dates, best/worst weekday, ratings during rush vs. off-peak), 4 charts (daily trend, weekday averages, platform revenue share, meal shifts), 30-minute HR staffing heatmap (Orders / Items + suggested cooks), and PDF / .xlsx exports.
+- Daily Breakdown: Per-day, per-brand table across all days in the database or a selected date range, with column sorting, status highlighting (Open, Closed, Disrupted, rejections), summary totals, and .xlsx / .csv export.
+- Losses & Payouts: Deduplicated financial summary and per-restaurant/platform breakdown from Bolt Food and Wolt payout/invoice documents (gross sales incl. VAT, commissions & fees, ads & promos, merchant discounts, deductions & refunds, total costs, cost share %, and platform payout), with .xlsx / .csv export.
+- Settings: All-in-one folder import, custom CSV/XLSX column mapper, restaurant/brand & alias management (including merging duplicate restaurants and toggling Active/Inactive status), continuous staffing rules, meal shifts, and item exclusion keywords.
+- Backups & Safety: Automatic database backups on startup and before major changes/imports/merges/deletes, duplicate protection, error logging (error_log.txt), and safe backup restore with SQLite integrity checks.
 
-Step B — Check the Operating Calendar:
-1. Open "Settings & Import" and review dates marked as Open, Closed, or Disrupted.
-2. Mark days when the kitchen was closed or had major disruptions so daily averages and operating comparisons stay realistic.
+2. STEP-BY-STEP WORKFLOW
+Step A — Import Order & Payout Files:
+1. Go to Settings -> Import and click "Import Folder".
+2. Select a folder (subfolders are scanned recursively). PDFs and payout/settlement CSVs go to the payouts importer; order CSV/XLSX files (Wolt, Bolt, or matching custom templates) go to the orders importer.
+3. For non-standard order CSV/XLSX exports, use "Custom Column Mapper" to map columns (such as Order Date/Time, Order ID, Venue/Brand Name, Items Count or Items Text, Sales Amount, Status, Customer Rating) and save a reusable template.
+4. Duplicate orders, duplicate files (SHA-256), and duplicate report fingerprints are skipped automatically. Cancelled, rejected, refunded, or void orders are excluded from completed sales.
 
-Step C — Merge Duplicate Brand Names:
-1. Delivery platforms sometimes spell the same brand in slightly different ways (for example, "Burger House" and "Burger House - Sliema").
-2. Go to "Settings" -> "Restaurants & Brands" -> "Combine Duplicate Restaurant Names".
-3. Pick the duplicate name as the source, choose your main target brand, and confirm. Existing orders stay safe and are reassigned cleanly.
+Step B — Manage Restaurants, Aliases & Merges:
+1. Delivery platforms sometimes list the same venue under different names or formats.
+2. In Settings -> Restaurants & Brands, you can:
+   - Add locations ("+ Loc") or brands ("+ Brand"), or edit a restaurant's Name, Location, and Status ("Active" / "Inactive"). Inactive brands are excluded from active analytics views.
+   - Review "Unmapped / Pending Names" (when "Auto-create new brands on import" is unchecked or unmapped items exist), assign them to an existing brand, create a new brand, defer them ("Later"), or click "Re-apply".
+   - Use "Merge Restaurant" -> "Merge & Save Alias" to merge a duplicate/secondary restaurant entry into a target restaurant while moving its records and saving the source name/aliases for future imports.
 
-Step D — Import Payouts & Review Finances:
-1. Import payout/invoice PDFs or CSVs in the finances/payouts section.
-2. Check brand mapping so each report links to the right restaurant brand.
-3. Compare gross sales, total costs, cost share %, and expected/actual payouts across date ranges.
+Step C — Configure Shifts, Staffing Rules & Dish Exclusions:
+1. Meal Shifts (Settings -> Meal Shifts): Define 24-hour HH:MM windows (e.g. Pre-Lunch, Lunch Rush, Afternoon, Dinner Rush, Late Night). Shifts containing "Rush" are used to compare Peak Rush vs. Off-Peak ratings.
+2. Staffing Rules (Settings -> Staffing Rules): Edit continuous load thresholds (Orders/hr and Items/hr, starting at 0.0 without gaps or overlaps) to set suggested cooks and load labels (e.g. Quiet, Steady, Busy, Peak Rush) shown in the 30-minute heatmap.
+3. Exclusions (Settings -> Exclusions): Enter comma-separated non-kitchen keywords (e.g. drinks, sauces, bottles, cutlery) so they are excluded when tallying dish names for the Top 10 Selling Dishes modal (click the Top Selling Dishes KPI card on the Dashboard).
 
-Step E — Export & Back Up:
-1. Export daily tables or reports to CSV/Excel when sharing numbers or checking details.
-2. Create a backup before big changes or end-of-week reviews. If anything ever goes wrong, restore from a valid backup safely.
+Step D — Review Analytics, Finances & Exports:
+1. Filter Dashboard, Daily Breakdown, or Losses & Payouts by date range, location, restaurant/brand, or platform.
+2. Export reports to PDF or .xlsx from the Dashboard, or .xlsx / .csv from Daily Breakdown and Losses & Payouts.
+3. Use "Restore Backup" in the sidebar if you ever need to roll back to an earlier snapshot.
 
 3. FORMULAS & HOW NUMBERS ARE CALCULATED
-All formulas below use straightforward arithmetic:
-
 - Completed Sales (Revenue):
-  Sum of order totals for non-cancelled/non-rejected orders in the selected period, location, and active brand(s).
+  Sum of order totals for non-cancelled/non-rejected orders in the selected scope and period (for active brands).
 
 - Average Order Value (AOV):
   AOV = Total Completed Sales / Number of Completed Orders
-  (If Completed Orders = 0, AOV is N/A or 0.00.)
+  (0.00 when Completed Orders = 0.)
 
 - 5-Star Order Share (%):
-  FiveStarPct = (Number of Orders with Rating == 5 / Number of Rated Orders) * 100
+  FiveStarPct = (Orders with Rating == 5.0 / Total Rated Orders) * 100
 
 - Rejected / Cancelled Orders & Lost Revenue:
-  Rejected Orders = Count of orders with status in (rejected, cancelled, canceled, refunded, void)
-  Lost Revenue = Sum of order totals across those rejected/cancelled orders
+  Rejected Orders = Count of orders with status in (rejected, cancelled, canceled, refunded, void, odrzucone, odrzucony, anulowane, anulowany, zwrocone)
+  Lost Revenue = Sum of order totals for those rejected/cancelled orders
 
-- Cost Share of Gross Sales (%):
-  CostSharePct = (Total Costs and Losses Gross / Gross Sales Total) * 100
+- Total Costs & Cost Share (%):
+  Total Costs = Commissions & Fees + Ads & Campaigns + Merchant Discounts + Deductions & Refunds + Other Adjustments
+  Cost Share % = (Total Costs / Gross Sales Total) * 100
 
-- Partial Period Overlap Ratio (when filtering payouts by Date From / Date To):
-  Suppose a payout covers period [P_start, P_end] with L_period days (inclusive):
-    L_period = (P_end - P_start) + 1 day
-  Suppose your filter covers [F_start, F_end]. The overlapping days [O_start, O_end] are:
-    O_start = max(P_start, F_start)
-    O_end   = min(P_end, F_end)
-    OverlapDays = max(0, (O_end - O_start) + 1 day)
+- Deduplication & Partial Period Overlap Ratio (Losses & Payouts):
+  When multiple documents cover the same platform/brand/period window, overlapping sales_report figures are deduplicated against settlement/invoice figures so sales and costs are not double-counted.
+  When filtering payouts by Date From / Date To, a report spanning [P_start, P_end] of length L_period = (P_end - P_start) + 1 day overlapping the filter by OverlapDays days is scaled by:
     OverlapRatio = OverlapDays / L_period
-  Scaled amount for the selected window:
     ScaledValue = PeriodValue * OverlapRatio
 
-4. WORKED EXAMPLES (NUMBERS YOU CAN CHECK BY HAND)
-
+4. WORKED EXAMPLES
 Example 1 — Completed vs. Cancelled Orders & AOV:
-Suppose on one day you have:
 - Order #1: EUR 20.00, 2 items, status = delivered, rating = 5
 - Order #2: EUR 30.00, 3 items, status = delivered, rating = 4
 - Order #3: EUR 25.00, 2 items, status = cancelled, rating = empty
-Result:
-- Completed Orders = 2 (#1 and #2)
-- Total Food Items = 2 + 3 = 5 (cancelled Order #3 items are excluded)
-- Total Food Sales = 20.00 + 30.00 = EUR 50.00
-- AOV = 50.00 / 2 = EUR 25.00
-- Rejected Orders = 1; Lost Revenue = EUR 25.00
-- 5-Star Order Share = (1 / 2) * 100 = 50.0% (out of 2 rated orders)
+Results: Completed Orders = 2; Total Food Items = 5; Total Food Sales = EUR 50.00; AOV = EUR 25.00; Rejected Orders = 1; Lost Revenue = EUR 25.00; 5-Star Share = 50.0%.
 
-Example 2 — Partial Date Overlap on a Weekly Payout:
-Suppose a weekly payout report covers 7 days: 2026-10-01 to 2026-10-07 (L_period = 7 days),
-with Gross Sales = EUR 700.00 and Total Costs = EUR 70.00 (Payout = EUR 630.00).
-You filter payouts from 2026-10-01 to 2026-10-03:
-- Overlapping days = Oct 1, Oct 2, Oct 3 -> OverlapDays = 3 days
-- OverlapRatio = 3 / 7
-- Scaled Gross Sales = 700.00 * (3 / 7) = EUR 300.00
-- Scaled Costs = 70.00 * (3 / 7) = EUR 30.00
-- Scaled Payout = 630.00 * (3 / 7) = EUR 270.00
-- Cost Share % = (30.00 / 300.00) * 100 = 10.0%
+Example 2 — Partial Period Overlap on a 7-Day Payout:
+- Report covers 2026-10-01 to 2026-10-07 (L_period = 7 days), Gross Sales = EUR 700.00, Total Costs = EUR 70.00, Payout = EUR 630.00.
+- Filter is 2026-10-01 to 2026-10-03 -> OverlapDays = 3, OverlapRatio = 3 / 7.
+- Scaled Gross Sales = EUR 300.00; Scaled Costs = EUR 30.00; Scaled Payout = EUR 270.00; Cost Share % = 10.0%.
 
-Example 3 — Multiple Virtual Brands in One Kitchen:
-Suppose Brand A and Brand B cook in the same kitchen during the same 30-minute slot:
-- Brand A has 4 orders; Brand B has 6 orders.
-- Viewing a single brand shows only that brand's orders.
-- Selecting "All Brands Combined" adds them together (4 + 6 = 10 orders in that slot) so kitchen/staffing load reflects the real combined volume.
+Example 3 — Combined Brands in One Kitchen:
+- In a single 30-minute slot, Brand A has 4 orders and Brand B has 6 orders.
+- Viewing a single brand shows only that brand's load; selecting "All Brands Combined" / "All Active Restaurants" sums them (10 orders) for combined kitchen staffing load.
 
-5. QUICK TROUBLESHOOTING TIPS
-- Numbers look lower than expected? Check the selected date range, active brand/location filter, and whether the day is marked Closed/Disrupted or orders were cancelled.
-- Seeing a brand name twice? Merge the duplicate into the main brand under Settings -> Restaurants & Brands.
-- Want to test safely? Keep a backup first and verify results against a known export file.
+5. QUICK TROUBLESHOOTING
+- Missing numbers or 0 values? Check the date range (YYYY-MM-DD), selected location/brand, whether the brand is marked Active, or whether orders were cancelled.
+- Top 10 Selling Dishes empty? Bolt exports often provide item counts without dish names; itemized dish names come from order item strings in supported/mapped exports.
+- Need data directory override? Set the GASTRO_APP_DIR environment variable (default is ~/Documents/GastroAnalytics with ~/.gastroanalytics fallback).
 """
-        ctk.CTkLabel(scroll, text="Documentation", font=ctk.CTkFont(family=DISPLAY_FONT, size=20, weight="bold"), text_color=PALETTE[theme_mode]["text"]).pack(anchor="w", pady=(0, 10))
-        ctk.CTkLabel(scroll, text=guide_text, justify="left", text_color=PALETTE[theme_mode]["text"], wraplength=700).pack(anchor="w")
+
+        ctk.CTkLabel(
+            scroll,
+            text=guide_text,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            justify="left",
+            anchor="nw",
+            text_color=t["text"],
+            wraplength=760,
+        ).grid(row=0, column=0, sticky="nw", padx=16, pady=14)
+
+        ctk.CTkButton(
+            self,
+            text="Close",
+            width=110,
+            fg_color=t["primary_bg"],
+            hover_color=t["primary_hover"],
+            text_color=t["primary_fg"],
+            command=self.destroy,
+        ).grid(row=2, column=0, pady=(0, 16))
+
         safe_modal_grab(self)
-
-
 class RestoreBackupDialog(ctk.CTkToplevel):
     def __init__(self, parent, theme_mode: str, on_restored_callback):
         super().__init__(parent)
